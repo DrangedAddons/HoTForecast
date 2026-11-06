@@ -2,7 +2,7 @@
 ## Title: HoTForecast
 ## Notes: Faint bars on EllesmereUI raid and party frames showing what your own HoTs (any class) will still heal, with the next tick brighter.
 ## Author: Dranged
-## Version: 0.4.2
+## Version: 0.4.3
 ## Dependencies: EllesmereUIRaidFrames
 ## SavedVariablesPerCharacter: HoTForecastCharDB
 

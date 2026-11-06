@@ -373,9 +373,9 @@ local function ApplyColor(ov)
     local c = db.color
     ov.tick:SetStatusBarColor(c.r, c.g, c.b, (db.tickAlpha or 65) / 100)
     ov.hot:SetStatusBarColor(c.r, c.g, c.b, (db.alpha or 35) / 100)
-    -- Flash: the bar colour pushed most of the way to white.
-    ov.flash:SetStatusBarColor(c.r + (1 - c.r) * 0.6, c.g + (1 - c.g) * 0.6,
-        c.b + (1 - c.b) * 0.6, 0.9)
+    -- Flash: the bar colour pushed partway to white.
+    ov.flash:SetStatusBarColor(c.r + (1 - c.r) * 0.4, c.g + (1 - c.g) * 0.4,
+        c.b + (1 - c.b) * 0.4, 0.9)
 end
 
 -- Lay spacer then hot along the health bar's fill direction, each starting at
@@ -419,32 +419,17 @@ local function Layout(ov)
     place(ov.tick, ov.spacer:GetStatusBarTexture())
     place(ov.hot, ov.tick:GetStatusBarTexture())
 
-    -- Flash: ends at the health fill's edge and grows back into the health,
-    -- so it lights up the chunk the tick just healed and rides the fill as
-    -- the real heal lands.
-    local fl, fill = ov.flash, health:GetStatusBarTexture()
-    fl:ClearAllPoints()
-    fl:SetOrientation(orient)
-    fl:SetReverseFill(not rev)
-    if orient == "VERTICAL" then
-        fl:SetHeight(h)
-        if rev then
-            fl:SetPoint("BOTTOMLEFT", fill, "BOTTOMLEFT", 0, 0)
-            fl:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT", 0, 0)
-        else
-            fl:SetPoint("TOPLEFT", fill, "TOPLEFT", 0, 0)
-            fl:SetPoint("TOPRIGHT", fill, "TOPRIGHT", 0, 0)
-        end
-    else
-        fl:SetWidth(w)
-        if rev then
-            fl:SetPoint("TOPLEFT", fill, "TOPLEFT", 0, 0)
-            fl:SetPoint("BOTTOMLEFT", fill, "BOTTOMLEFT", 0, 0)
-        else
-            fl:SetPoint("TOPRIGHT", fill, "TOPRIGHT", 0, 0)
-            fl:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT", 0, 0)
-        end
-    end
+    -- Flash: pinned to where the tick heals into, i.e. from the health the
+    -- unit had before the tick (flashBase, an invisible copy of the health bar
+    -- fed that stored value) forward by the tick amount. With EllesmereUI's
+    -- smooth bars the HP then slides up underneath it; it never covers HP the
+    -- unit already had.
+    local base = ov.flashBase
+    base:ClearAllPoints()
+    base:SetAllPoints(health)
+    base:SetOrientation(orient)
+    base:SetReverseFill(rev)
+    place(ov.flash, base:GetStatusBarTexture())
 end
 
 -- Short pop: bright, then fade out. Engine-side animation, no OnUpdate.
@@ -463,9 +448,15 @@ local function NewFlash(health, mask)
     return fl
 end
 
-local function Flash(ov, amount, maxH)
+-- baseHP/baseMax: the health before the tick (may be secret); amount/maxH:
+-- the tick on its own scale. Each bar keeps its own min/max, so the two
+-- scales never need combining in Lua.
+local function Flash(ov, amount, maxH, baseHP, baseMax)
     local fl = ov.flash
     fl.anim:Stop()
+    ov.flashBase:SetMinMaxValues(0, baseMax)
+    ov.flashBase:SetValue(baseHP)
+    ov.flashBase:Show()
     fl:SetMinMaxValues(0, maxH)
     fl:SetValue(amount)
     fl:SetAlpha(1)
@@ -488,6 +479,8 @@ local function Attach(button)
     ov.spacer:SetStatusBarColor(0, 0, 0, 0)
     ov.tick = NewBar(health, mask) -- next tick, brighter
     ov.hot = NewBar(health, mask)  -- the rest
+    ov.flashBase = NewBar(health, mask)
+    ov.flashBase:SetStatusBarColor(0, 0, 0, 0)
     ov.flash = NewFlash(health, mask)
     if CreateUnitHealPredictionCalculator then
         local ok, calc = pcall(CreateUnitHealPredictionCalculator)
@@ -539,7 +532,7 @@ local function PaintOverlay(ov, now)
         ov.spacer:Show(); ov.tick:Show(); ov.hot:Show(); ov.shown = true
         if db.flash and (not ov.testFlashAt or now >= ov.testFlashAt) then
             ov.testFlashAt = now + 3
-            Flash(ov, 10, 100)
+            Flash(ov, 10, 100, UnitHealth(unit), UnitHealthMax(unit))
         end
         return
     end
@@ -553,8 +546,16 @@ local function PaintOverlay(ov, now)
     local landedAmt = guid and pendingFlash[guid]
     if landedAmt then
         pendingFlash[guid] = nil
-        if db.flash and landedAmt > 0 then Flash(ov, landedAmt, UnitHealthMax(unit)) end
+        if db.flash and landedAmt > 0 then
+            local maxH = UnitHealthMax(unit)
+            local base = ov.prevHP
+            if not issecret(base) and base == nil then base = UnitHealth(unit) end
+            Flash(ov, landedAmt, maxH, base, maxH)
+        end
     end
+    -- Health as of this paint (secret; stored, never compared): the next
+    -- tick's flash starts from here.
+    ov.prevHP = UnitHealth(unit)
 
     if amount <= 0 then return HideOverlay(ov) end
     local dead = UnitIsDeadOrGhost(unit)
@@ -691,7 +692,19 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
         end
         -- Repaint now, not on the next 0.1s pass, so the bars move on in the
         -- same frame the HP rises.
-        if guid and OnHealthEvent(guid, GetTime()) then PaintAll() end
+        if not guid or not hots[guid] then return end
+        if OnHealthEvent(guid, GetTime()) then
+            PaintAll()
+        else
+            -- Not a tick: just remember the new health, so a tick's flash
+            -- starts from exactly where the HP was before that tick.
+            for _, ov in pairs(overlays) do
+                local u = ov.button:GetAttribute("unit")
+                if type(u) == "string" and PlainGUID(u) == guid then
+                    ov.prevHP = UnitHealth(u)
+                end
+            end
+        end
     elseif event == "UNIT_AURA" then
         if issecret(a1) or type(a1) ~= "string" then return end
         if (a1 == "player" or a1:match("^party%d$") or a1:match("^raid%d+$")) and AurasReadable() then
