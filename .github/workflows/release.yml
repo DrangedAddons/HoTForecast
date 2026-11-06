@@ -1,0 +1,57 @@
+# Builds the addon zip and publishes a GitHub Release when a version tag (v*) is pushed.
+# Ordinary pushes to main do nothing - only a deliberately pushed tag cuts a release
+# (and the release is what the Discord announcement picks up).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # all tags, to find the previous release for the notes
+
+      - name: Check the tag matches the .toc version
+        run: |
+          TOC_VERSION=$(grep -m1 '^## Version:' HoTForecast.toc | sed 's/^## Version:[[:space:]]*//' | tr -d '\r')
+          if [ "v${TOC_VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} doesn't match HoTForecast.toc version ${TOC_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Build zip
+        run: |
+          mkdir -p build/HoTForecast
+          rsync -a --exclude='.git*' --exclude='.github' --exclude='build' ./ build/HoTForecast/
+          cd build && zip -qr "../HoTForecast-${GITHUB_REF_NAME}.zip" HoTForecast
+
+      # Every CHANGELOG section since the previous release, so versions that were never tagged on
+      # their own still get announced. Each older version gets its own sub-heading.
+      - name: Release notes from CHANGELOG.md
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          PREV="${PREV#v}"
+          echo "Notes from ${VERSION} back to (not including) ${PREV:-the start}"
+          tr -d '\r' < CHANGELOG.md | awk -v v="## ${VERSION}" -v p="## ${PREV}" '
+            $0 == v { found = 1; next }
+            found && p != "## " && $0 == p { exit }
+            found && /^## / { if (p == "## ") exit; sub(/^## /, "### "); print; next }
+            found { print }
+          ' > notes.md
+          if [ ! -s notes.md ]; then echo "HoTForecast ${GITHUB_REF_NAME}" > notes.md; fi
+          cat notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" "HoTForecast-${GITHUB_REF_NAME}.zip" \
+            --title "HoTForecast ${GITHUB_REF_NAME}" --notes-file notes.md
