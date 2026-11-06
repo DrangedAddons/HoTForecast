@@ -200,9 +200,11 @@ end
 -- A tick is "landed" once the unit's health event arrives near its due time,
 -- so the HP rises into the tick segment and the next tick starts from the new
 -- edge in the same frame. EARLY: a health event this long before the due time
--- still counts (timer drift). LATE: with no health event (target at full HP,
--- so nothing changes) the tick lands on its own this long after.
-local EARLY, LATE = 0.4, 0.6
+-- still counts. LATE: with no health event (target at full HP, so nothing
+-- changes) the tick lands on its own this long after. Traced Rejuvenation
+-- ticks arrived 0.01-0.08s early, so the window is tight: a wider one let
+-- regen and other heals land a tick ~0.4s before the real heal.
+local EARLY, LATE = 0.15, 0.25
 local pendingFlash = {}  -- guid -> healing of ticks that just landed
 
 local function StartHot(guid, name, spellID, start, dur, total, tick)
@@ -309,8 +311,16 @@ local function SyncUnitFromAuras(unit)
     end
     local list = hots[guid]
     if list then
-        for name in pairs(list) do
-            if not seen[name] then list[name] = nil end
+        local now = GetTime()
+        for name, h in pairs(list) do
+            if not seen[name] then
+                -- The aura drops in the same moment as its last tick, often
+                -- before the health event: land what's left so it flashes.
+                if h.landed < h.ticks and now >= h.start + h.dur - EARLY - 0.1 then
+                    Land(guid, h, h.ticks - h.landed, "aura end", now)
+                end
+                list[name] = nil
+            end
         end
         if not next(list) then hots[guid] = nil end
     end
@@ -686,6 +696,7 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
         if issecret(a1) or type(a1) ~= "string" then return end
         if (a1 == "player" or a1:match("^party%d$") or a1:match("^raid%d+$")) and AurasReadable() then
             SyncUnitFromAuras(a1)
+            PaintAll()
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
         wipe(pendingCasts)
