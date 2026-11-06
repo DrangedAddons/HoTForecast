@@ -358,13 +358,14 @@ local function FindHealthBar(button)
     return best
 end
 
-local function NewBar(health, mask)
+local function NewBar(health, mask, level, shapeMask)
     local bar = CreateFrame("StatusBar", nil, health)
     bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
     local fill = bar:GetStatusBarTexture()
     fill:SetDrawLayer("ARTWORK", 1)
     fill:AddMaskTexture(mask)
-    bar:SetFrameLevel(health:GetFrameLevel() + 3)
+    if shapeMask then pcall(fill.AddMaskTexture, fill, shapeMask) end
+    bar:SetFrameLevel(health:GetFrameLevel() + (level or 3))
     bar:Hide()
     return bar
 end
@@ -433,9 +434,8 @@ local function Layout(ov)
 end
 
 -- Short pop: bright, then fade out. Engine-side animation, no OnUpdate.
-local function NewFlash(health, mask)
-    local fl = NewBar(health, mask)
-    fl:SetFrameLevel(health:GetFrameLevel() + 4)
+local function NewFlash(health, mask, level, shapeMask)
+    local fl = NewBar(health, mask, level, shapeMask)
     fl:GetStatusBarTexture():SetDrawLayer("ARTWORK", 3)
     local ag = fl:CreateAnimationGroup()
     local a = ag:CreateAnimation("Alpha")
@@ -464,24 +464,28 @@ local function Flash(ov, amount, maxH, baseHP, baseMax)
     fl.anim:Play()
 end
 
-local function Attach(button)
+-- level: our bars' frame level above the health bar. EllesmereUI's own
+-- prediction sits at +3; WebbyFrames' at +1 with its frame art above that.
+-- shapeMask: the frame's health-shape mask, if it has one (WebbyFrames).
+local function Attach(button, health, level, shapeMask)
     local ov = overlays[button]
     if ov then return ov end
-    local health = FindHealthBar(button)
+    health = health or FindHealthBar(button)
     if not health then return nil end
+    level = level or 3
     local mask = health:CreateMaskTexture()
     mask:SetAllPoints(health)
     mask:SetTexture("Interface\\Buttons\\WHITE8X8", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE", "NEAREST")
     ov = { button = button, health = health, mask = mask }
     -- Invisible stand-in for EllesmereUI's incoming-heal bar, so ours starts
     -- where its green ends.
-    ov.spacer = NewBar(health, mask)
+    ov.spacer = NewBar(health, mask, level, shapeMask)
     ov.spacer:SetStatusBarColor(0, 0, 0, 0)
-    ov.tick = NewBar(health, mask) -- next tick, brighter
-    ov.hot = NewBar(health, mask)  -- the rest
-    ov.flashBase = NewBar(health, mask)
+    ov.tick = NewBar(health, mask, level, shapeMask) -- next tick, brighter
+    ov.hot = NewBar(health, mask, level, shapeMask)  -- the rest
+    ov.flashBase = NewBar(health, mask, level, shapeMask)
     ov.flashBase:SetStatusBarColor(0, 0, 0, 0)
-    ov.flash = NewFlash(health, mask)
+    ov.flash = NewFlash(health, mask, level + 1, shapeMask)
     if CreateUnitHealPredictionCalculator then
         local ok, calc = pcall(CreateUnitHealPredictionCalculator)
         if ok and calc then
@@ -496,6 +500,19 @@ local function Attach(button)
     return ov
 end
 
+-- WebbyFrames: unit frames (WebbyFrames_<unit>, live unit in .wfUnit) and the
+-- raid-style party tiles (WebbyFrames_RaidParty<i>, unit attribute). Both keep
+-- their health bar in .hp.
+local WEBBY_UNITS = { "player", "target", "targettarget", "focus", "focustarget", "pet",
+                      "party1", "party2", "party3", "party4" }
+
+local function AttachWebby(f)
+    if not f or type(f.hp) ~= "table" or not f.hp.GetStatusBarTexture then return end
+    local shape = f.hpMaskOn and f.hpMask or nil
+    local ov = Attach(f, f.hp, 1, shape)
+    if ov then Layout(ov) end
+end
+
 local function ScanButtons()
     for _, hname in ipairs(HEADERS) do
         local hdr = _G[hname]
@@ -508,6 +525,20 @@ local function ScanButtons()
             end
         end
     end
+    for _, u in ipairs(WEBBY_UNITS) do AttachWebby(_G["WebbyFrames_" .. u]) end
+    for i = 1, 40 do
+        local t = _G["WebbyFrames_RaidParty" .. i]
+        if not t then break end
+        AttachWebby(t)
+    end
+end
+
+-- WebbyFrames keeps the live unit in .wfUnit (its party frames can switch
+-- unit); everything else uses the secure "unit" attribute.
+local function OverlayUnit(btn)
+    local u = btn.wfUnit
+    if type(u) == "string" and not issecret(u) then return u end
+    return btn:GetAttribute("unit")
 end
 
 local function HideOverlay(ov)
@@ -522,7 +553,7 @@ end
 local function PaintOverlay(ov, now)
     local btn = ov.button
     if not db.enabled or not btn:IsVisible() then return HideOverlay(ov) end
-    local unit = btn:GetAttribute("unit")
+    local unit = OverlayUnit(btn)
     if type(unit) ~= "string" or not UnitExists(unit) then return HideOverlay(ov) end
 
     if testMode then
@@ -699,7 +730,7 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
             -- Not a tick: just remember the new health, so a tick's flash
             -- starts from exactly where the HP was before that tick.
             for _, ov in pairs(overlays) do
-                local u = ov.button:GetAttribute("unit")
+                local u = OverlayUnit(ov.button)
                 if type(u) == "string" and PlainGUID(u) == guid then
                     ov.prevHP = UnitHealth(u)
                 end
