@@ -37,6 +37,25 @@ local function Print(msg)
     print("|cff8cf2b8HoTForecast|r " .. msg)
 end
 
+-- Timing trace (/hotf trace): cast times, expected ticks, every health change
+-- on a traced target and how each tick landed. Saved in HoTForecastCharDB.trace.
+local TRACE_MAX = 4000
+local tracing = false
+local traceRef = {}      -- guid -> start time of the latest traced HoT
+local traceUntil = {}    -- guid -> keep logging health changes until this time
+
+local function Trace(fmt, ...)
+    if not tracing or not db then return end
+    local t = db.trace
+    if not t or #t >= TRACE_MAX then return end
+    t[#t + 1] = string.format("%.3f ", GetTime()) .. string.format(fmt, ...)
+end
+
+local function Rel(guid, now)
+    local r = traceRef[guid]
+    return r and (now - r) or -1
+end
+
 ------------------------------------------------------------------------------
 -- Spell amounts from the description
 ------------------------------------------------------------------------------
@@ -199,10 +218,16 @@ local function StartHot(guid, name, spellID, start, dur, total, tick)
         landed = math.max(0, math.floor((GetTime() - start) / tick))
     end
     hots[guid][name] = { start = start, dur = dur, total = total, ticks = ticks,
-                         tick = tick, spellID = spellID, landed = math.min(landed, ticks) }
+                         tick = tick, spellID = spellID, landed = math.min(landed, ticks),
+                         name = name }
 end
 
-local function Land(guid, h, n)
+local function Land(guid, h, n, via, now)
+    if tracing then
+        Trace("LAND %s tick %d/%d via %s at +%.3f (due +%.3f) %s", h.name or "?",
+            h.landed + n, h.ticks, via, Rel(guid, now), (h.landed + n) * h.tick + (h.start - (traceRef[guid] or h.start)),
+            guid:sub(-8))
+    end
     h.landed = h.landed + n
     pendingFlash[guid] = (pendingFlash[guid] or 0) + h.total / h.ticks * n
 end
@@ -214,7 +239,7 @@ local function OnHealthEvent(guid, now)
     local any = false
     for _, h in pairs(list) do
         while h.landed < h.ticks and now >= h.start + (h.landed + 1) * h.tick - EARLY do
-            Land(guid, h, 1)
+            Land(guid, h, 1, "health", now)
             any = true
         end
     end
@@ -232,7 +257,7 @@ local function Forecast(guid, now)
     for name, h in pairs(list) do
         -- Ticks overdue with no health event: land them now.
         while h.landed < h.ticks and now >= h.start + (h.landed + 1) * h.tick + LATE do
-            Land(guid, h, 1)
+            Land(guid, h, 1, "timeout", now)
         end
         local left = h.ticks - h.landed
         if left <= 0 then
@@ -594,7 +619,18 @@ local function OnCastSucceeded(castGUID, spellID)
     if not guid then return end
     local total, dur, tick = SpellAmount(spellID)
     if not total then return end
-    StartHot(guid, name, spellID, GetTime(), dur, total, tick)
+    local now = GetTime()
+    StartHot(guid, name, spellID, now, dur, total, tick)
+    if tracing then
+        local h = hots[guid][name]
+        traceRef[guid] = now
+        traceUntil[guid] = now + dur + 5
+        local due = {}
+        for k = 1, h.ticks do due[#due + 1] = string.format("%.1f", k * h.tick) end
+        Trace("CAST %s (%d) on %s %s combat=%s: %d over %ss, %d ticks of %.1f every %.2fs, due +%s",
+            name, spellID, unit, guid:sub(-8), tostring(InCombatLockdown()), total, dur,
+            h.ticks, total / h.ticks, h.tick, table.concat(due, " +"))
+    end
 end
 
 f:RegisterEvent("ADDON_LOADED")
@@ -635,6 +671,14 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
     elseif event == "UNIT_HEALTH" then
         if issecret(a1) or type(a1) ~= "string" then return end
         local guid = PlainGUID(a1)
+        if tracing and guid and traceUntil[guid] then
+            local now = GetTime()
+            if now <= traceUntil[guid] then
+                Trace("HP %s +%.3f %s", a1, Rel(guid, now), guid:sub(-8))
+            else
+                traceUntil[guid] = nil
+            end
+        end
         -- Repaint now, not on the next 0.1s pass, so the bars move on in the
         -- same frame the HP rises.
         if guid and OnHealthEvent(guid, GetTime()) then PaintAll() end
@@ -717,6 +761,20 @@ SlashCmdList.HOTFORECAST = function(msg)
         ScanButtons()
         Print(testMode and "test bars on (10% next tick + 20% rest on every frame). /hotf test again to stop."
             or "test bars off.")
+    elseif cmd == "trace" then
+        if rest == "clear" then
+            db.trace = {}
+            Print("trace cleared.")
+        elseif tracing then
+            tracing = false
+            Print("trace off (" .. #(db.trace or {}) .. " lines). /reload to save it.")
+        else
+            db.trace = db.trace or {}
+            tracing = true
+            Trace("---- trace on")
+            Print("trace on. Cast one HoT on someone who isn't taking damage, "
+                .. "let it run out, then /hotf trace again and /reload.")
+        end
     elseif cmd == "debug" then
         local n, now = 0, GetTime()
         for _ in pairs(overlays) do n = n + 1 end
@@ -736,6 +794,6 @@ SlashCmdList.HOTFORECAST = function(msg)
             end
         end
     else
-        Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | color <r g b> | test | debug")
+        Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | color <r g b> | test | debug | trace [clear]")
     end
 end
