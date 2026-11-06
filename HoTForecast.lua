@@ -23,6 +23,7 @@ local DEFAULTS = {
     color = { r = 0.55, g = 1.0, b = 0.75 },
     alpha = 35,          -- percent, the rest of the HoTs
     tickAlpha = 65,      -- percent, the next tick
+    flash = true,        -- pop the healed chunk when a tick goes off
 }
 
 local db
@@ -177,45 +178,80 @@ end
 -- HoT timers
 ------------------------------------------------------------------------------
 
+-- A tick is "landed" once the unit's health event arrives near its due time,
+-- so the HP rises into the tick segment and the next tick starts from the new
+-- edge in the same frame. EARLY: a health event this long before the due time
+-- still counts (timer drift). LATE: with no health event (target at full HP,
+-- so nothing changes) the tick lands on its own this long after.
+local EARLY, LATE = 0.4, 0.6
+local pendingFlash = {}  -- guid -> healing of ticks that just landed
+
 local function StartHot(guid, name, spellID, start, dur, total, tick)
     tick = tick or DEFAULT_TICK
     local ticks = math.max(1, math.floor(dur / tick + 0.5))
+    tick = dur / ticks
     hots[guid] = hots[guid] or {}
+    local cur = hots[guid][name]
+    local landed
+    if cur and cur.spellID == spellID and math.abs(cur.start - start) < 0.5 then
+        landed = cur.landed -- same HoT re-read from its aura: keep the hold state
+    else
+        landed = math.max(0, math.floor((GetTime() - start) / tick))
+    end
     hots[guid][name] = { start = start, dur = dur, total = total, ticks = ticks,
-                         tick = dur / ticks, spellID = spellID }
+                         tick = tick, spellID = spellID, landed = math.min(landed, ticks) }
 end
 
--- Healing still to come from the remaining ticks, summed over my HoTs on guid,
--- plus the size of the soonest tick. HoTs ticking within 0.1s of each other
--- count as one tick (their amounts add).
+local function Land(guid, h, n)
+    h.landed = h.landed + n
+    pendingFlash[guid] = (pendingFlash[guid] or 0) + h.total / h.ticks * n
+end
+
+-- Health changed on guid: land any tick that is due (or nearly due).
+local function OnHealthEvent(guid, now)
+    local list = hots[guid]
+    if not list then return false end
+    local any = false
+    for _, h in pairs(list) do
+        while h.landed < h.ticks and now >= h.start + (h.landed + 1) * h.tick - EARLY do
+            Land(guid, h, 1)
+            any = true
+        end
+    end
+    return any
+end
+
+-- Healing still to come from the ticks that haven't landed, summed over my
+-- HoTs on guid, plus the size of the soonest tick. HoTs ticking within 0.1s
+-- of each other count as one tick (their amounts add).
 local function Forecast(guid, now)
     local list = hots[guid]
-    if not list then return 0, 0 end
+    if not list then return 0, 0, nil end
     local sum, any = 0, false
     local nextAt, nextAmt = nil, 0
     for name, h in pairs(list) do
-        local elapsed = now - h.start
-        if elapsed >= h.dur then
+        -- Ticks overdue with no health event: land them now.
+        while h.landed < h.ticks and now >= h.start + (h.landed + 1) * h.tick + LATE do
+            Land(guid, h, 1)
+        end
+        local left = h.ticks - h.landed
+        if left <= 0 then
             list[name] = nil
         else
-            local done = math.floor(elapsed / h.tick)
-            local left = h.ticks - done
-            if left > 0 then
-                local perTick = h.total / h.ticks
-                sum = sum + perTick * left
-                local at = h.start + (done + 1) * h.tick
-                if not nextAt or at < nextAt - 0.1 then
-                    nextAt, nextAmt = at, perTick
-                elseif at <= nextAt + 0.1 then
-                    nextAmt = nextAmt + perTick
-                    if at < nextAt then nextAt = at end
-                end
+            local perTick = h.total / h.ticks
+            sum = sum + perTick * left
+            local at = h.start + (h.landed + 1) * h.tick
+            if not nextAt or at < nextAt - 0.1 then
+                nextAt, nextAmt = at, perTick
+            elseif at <= nextAt + 0.1 then
+                nextAmt = nextAmt + perTick
+                if at < nextAt then nextAt = at end
             end
             any = true
         end
     end
     if not any then hots[guid] = nil end
-    return sum, nextAmt
+    return sum, nextAmt, nextAt
 end
 
 -- Out of combat the auras are the truth: rebuild timers from them.
@@ -302,6 +338,9 @@ local function ApplyColor(ov)
     local c = db.color
     ov.tick:SetStatusBarColor(c.r, c.g, c.b, (db.tickAlpha or 65) / 100)
     ov.hot:SetStatusBarColor(c.r, c.g, c.b, (db.alpha or 35) / 100)
+    -- Flash: the bar colour pushed most of the way to white.
+    ov.flash:SetStatusBarColor(c.r + (1 - c.r) * 0.6, c.g + (1 - c.g) * 0.6,
+        c.b + (1 - c.b) * 0.6, 0.9)
 end
 
 -- Lay spacer then hot along the health bar's fill direction, each starting at
@@ -344,6 +383,59 @@ local function Layout(ov)
     place(ov.spacer, health:GetStatusBarTexture())
     place(ov.tick, ov.spacer:GetStatusBarTexture())
     place(ov.hot, ov.tick:GetStatusBarTexture())
+
+    -- Flash: ends at the health fill's edge and grows back into the health,
+    -- so it lights up the chunk the tick just healed and rides the fill as
+    -- the real heal lands.
+    local fl, fill = ov.flash, health:GetStatusBarTexture()
+    fl:ClearAllPoints()
+    fl:SetOrientation(orient)
+    fl:SetReverseFill(not rev)
+    if orient == "VERTICAL" then
+        fl:SetHeight(h)
+        if rev then
+            fl:SetPoint("BOTTOMLEFT", fill, "BOTTOMLEFT", 0, 0)
+            fl:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT", 0, 0)
+        else
+            fl:SetPoint("TOPLEFT", fill, "TOPLEFT", 0, 0)
+            fl:SetPoint("TOPRIGHT", fill, "TOPRIGHT", 0, 0)
+        end
+    else
+        fl:SetWidth(w)
+        if rev then
+            fl:SetPoint("TOPLEFT", fill, "TOPLEFT", 0, 0)
+            fl:SetPoint("BOTTOMLEFT", fill, "BOTTOMLEFT", 0, 0)
+        else
+            fl:SetPoint("TOPRIGHT", fill, "TOPRIGHT", 0, 0)
+            fl:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT", 0, 0)
+        end
+    end
+end
+
+-- Short pop: bright, then fade out. Engine-side animation, no OnUpdate.
+local function NewFlash(health, mask)
+    local fl = NewBar(health, mask)
+    fl:SetFrameLevel(health:GetFrameLevel() + 4)
+    fl:GetStatusBarTexture():SetDrawLayer("ARTWORK", 3)
+    local ag = fl:CreateAnimationGroup()
+    local a = ag:CreateAnimation("Alpha")
+    a:SetFromAlpha(1)
+    a:SetToAlpha(0)
+    a:SetDuration(0.5)
+    a:SetSmoothing("OUT")
+    ag:SetScript("OnFinished", function() fl:Hide() end)
+    fl.anim = ag
+    return fl
+end
+
+local function Flash(ov, amount, maxH)
+    local fl = ov.flash
+    fl.anim:Stop()
+    fl:SetMinMaxValues(0, maxH)
+    fl:SetValue(amount)
+    fl:SetAlpha(1)
+    fl:Show()
+    fl.anim:Play()
 end
 
 local function Attach(button)
@@ -361,6 +453,7 @@ local function Attach(button)
     ov.spacer:SetStatusBarColor(0, 0, 0, 0)
     ov.tick = NewBar(health, mask) -- next tick, brighter
     ov.hot = NewBar(health, mask)  -- the rest
+    ov.flash = NewFlash(health, mask)
     if CreateUnitHealPredictionCalculator then
         local ok, calc = pcall(CreateUnitHealPredictionCalculator)
         if ok and calc then
@@ -409,12 +502,25 @@ local function PaintOverlay(ov, now)
         ov.tick:SetMinMaxValues(0, 100); ov.tick:SetValue(10)
         ov.hot:SetMinMaxValues(0, 100); ov.hot:SetValue(20)
         ov.spacer:Show(); ov.tick:Show(); ov.hot:Show(); ov.shown = true
+        if db.flash and (not ov.testFlashAt or now >= ov.testFlashAt) then
+            ov.testFlashAt = now + 3
+            Flash(ov, 10, 100)
+        end
         return
     end
 
     local guid = PlainGUID(unit)
-    local amount, nextTick = 0, 0
-    if guid then amount, nextTick = Forecast(guid, now) end
+    local amount, nextTick, nextAt = 0, 0, nil
+    if guid then amount, nextTick, nextAt = Forecast(guid, now) end
+
+    -- Ticks that just landed: pop the chunk they healed. Runs before the
+    -- amount check so the last tick of a HoT still flashes.
+    local landedAmt = guid and pendingFlash[guid]
+    if landedAmt then
+        pendingFlash[guid] = nil
+        if db.flash and landedAmt > 0 then Flash(ov, landedAmt, UnitHealthMax(unit)) end
+    end
+
     if amount <= 0 then return HideOverlay(ov) end
     local dead = UnitIsDeadOrGhost(unit)
     if not issecret(dead) and dead then
@@ -498,6 +604,7 @@ f:RegisterEvent("GROUP_ROSTER_UPDATE")
 f:RegisterEvent("SPELLS_CHANGED")
 f:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 f:RegisterEvent("UNIT_AURA")
+f:RegisterEvent("UNIT_HEALTH")
 f:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")
 f:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 
@@ -525,6 +632,12 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
         OnCastSent(a2, a3, a4)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         OnCastSucceeded(a2, a3)
+    elseif event == "UNIT_HEALTH" then
+        if issecret(a1) or type(a1) ~= "string" then return end
+        local guid = PlainGUID(a1)
+        -- Repaint now, not on the next 0.1s pass, so the bars move on in the
+        -- same frame the HP rises.
+        if guid and OnHealthEvent(guid, GetTime()) then PaintAll() end
     elseif event == "UNIT_AURA" then
         if issecret(a1) or type(a1) ~= "string" then return end
         if (a1 == "player" or a1:match("^party%d$") or a1:match("^raid%d+$")) and AurasReadable() then
@@ -532,6 +645,7 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
         wipe(pendingCasts)
+        wipe(pendingFlash)
         C_Timer.After(0.2, SyncAllFromAuras)
     elseif event == "GROUP_ROSTER_UPDATE" then
         C_Timer.After(0.5, function()
@@ -580,6 +694,13 @@ SlashCmdList.HOTFORECAST = function(msg)
         else
             Print("usage: /hotf tickalpha 0-100")
         end
+    elseif cmd == "flash" then
+        if rest == "on" or rest == "off" then
+            db.flash = rest == "on"
+        else
+            db.flash = not db.flash
+        end
+        Print("tick flash " .. (db.flash and "on." or "off."))
     elseif cmd == "color" then
         local r, g, b = rest:match("^([%d%.]+)%s+([%d%.]+)%s+([%d%.]+)$")
         r, g, b = tonumber(r), tonumber(g), tonumber(b)
@@ -602,9 +723,9 @@ SlashCmdList.HOTFORECAST = function(msg)
         Print(n .. " frames attached.")
         for guid, list in pairs(hots) do
             for name, h in pairs(list) do
-                Print(string.format("%s %s: %d of %d left, %.1fs left", guid:sub(-8), name,
-                    math.floor(h.total * (h.ticks - math.floor((now - h.start) / h.tick)) / h.ticks),
-                    h.total, h.dur - (now - h.start)))
+                Print(string.format("%s %s: %d of %d left, %d/%d ticks landed, %.1fs left",
+                    guid:sub(-8), name, math.floor(h.total * (h.ticks - h.landed) / h.ticks),
+                    h.total, h.landed, h.ticks, h.dur - (now - h.start)))
             end
         end
         for id, c in pairs(descCache) do
@@ -615,6 +736,6 @@ SlashCmdList.HOTFORECAST = function(msg)
             end
         end
     else
-        Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | color <r g b> | test | debug")
+        Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | color <r g b> | test | debug")
     end
 end
