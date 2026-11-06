@@ -205,7 +205,12 @@ end
 -- ticks arrived 0.01-0.08s early, so the window is tight: a wider one let
 -- regen and other heals land a tick ~0.4s before the real heal.
 local EARLY, LATE = 0.15, 0.25
-local pendingFlash = {}  -- guid -> healing of ticks that just landed
+-- guid -> { id, amount, at } for the ticks that just landed. Every frame
+-- showing that unit flashes it once (ov.flashSeen = id), so a unit on both an
+-- EllesmereUI and a WebbyFrames frame lights up on both.
+local pendingFlash = {}
+local flashId = 0
+local FLASH_WINDOW = 0.3 -- a frame that repaints later than this skips it
 
 local function StartHot(guid, name, spellID, start, dur, total, tick)
     tick = tick or DEFAULT_TICK
@@ -231,7 +236,14 @@ local function Land(guid, h, n, via, now)
             guid:sub(-8))
     end
     h.landed = h.landed + n
-    pendingFlash[guid] = (pendingFlash[guid] or 0) + h.total / h.ticks * n
+    local now2 = GetTime()
+    local pf = pendingFlash[guid]
+    if pf and now2 - pf.at < 0.05 then
+        pf.amount = pf.amount + h.total / h.ticks * n -- same moment: one flash
+    else
+        flashId = flashId + 1
+        pendingFlash[guid] = { id = flashId, amount = h.total / h.ticks * n, at = now2 }
+    end
 end
 
 -- Health changed on guid: land any tick that is due (or nearly due).
@@ -574,9 +586,14 @@ local function PaintOverlay(ov, now)
 
     -- Ticks that just landed: pop the chunk they healed. Runs before the
     -- amount check so the last tick of a HoT still flashes.
-    local landedAmt = guid and pendingFlash[guid]
-    if landedAmt then
+    local pf = guid and pendingFlash[guid]
+    if pf and now - pf.at > FLASH_WINDOW then
         pendingFlash[guid] = nil
+        pf = nil
+    end
+    if pf and ov.flashSeen ~= pf.id then
+        ov.flashSeen = pf.id
+        local landedAmt = pf.amount
         if db.flash and landedAmt > 0 then
             local maxH = UnitHealthMax(unit)
             local base = ov.prevHP
