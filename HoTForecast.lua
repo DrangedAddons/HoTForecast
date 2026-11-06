@@ -24,6 +24,7 @@ local DEFAULTS = {
     alpha = 35,          -- percent, the rest of the HoTs
     tickAlpha = 65,      -- percent, the next tick
     flash = true,        -- pop the healed chunk when a tick goes off
+    share = true,        -- send your HoTs to the group and show other users'
 }
 
 local db
@@ -293,6 +294,98 @@ local function Forecast(guid, now)
     return sum, nextAmt, nextAt
 end
 
+------------------------------------------------------------------------------
+-- Sharing: every HoTForecast user broadcasts their own HoTs to the group, so
+-- you also see the HoTs of other healers who run it. Keys for shared HoTs are
+-- "<casterGUID>@<spell name>" (own HoTs are keyed by spell name alone).
+-- Fields are ";"-separated: "|" starts WoW escape codes.
+--   1;S;<caster>;<target>;<spellID>;<total>;<dur>;<tick>;<age>   started/refreshed
+--   1;R;<caster>;<target>;<spellID>                              removed early
+-- age = seconds since it was applied, so clocks never need to agree.
+------------------------------------------------------------------------------
+
+local PREFIX = "HoTF"
+local comm = { sent = 0, failed = 0, recv = 0, bad = 0, secret = 0, lastResult = "-" }
+
+local function GroupChannel()
+    if LE_PARTY_CATEGORY_INSTANCE and IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then return "INSTANCE_CHAT" end
+    if IsInRaid() then return "RAID" end
+    if IsInGroup() then return "PARTY" end
+    return nil
+end
+
+local function Send(msg)
+    if not db or not db.share then return end
+    local ch = GroupChannel()
+    if not ch or not (C_ChatInfo and C_ChatInfo.SendAddonMessage) then return end
+    local ok, res = pcall(C_ChatInfo.SendAddonMessage, PREFIX, msg, ch)
+    local good = false
+    if ok then
+        if issecret(res) then
+            comm.lastResult = "SECRET"
+        else
+            comm.lastResult = tostring(res)
+            local okEnum = Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.Success
+            good = res == nil or res == true or res == 0 or (okEnum ~= nil and res == okEnum)
+        end
+    else
+        comm.lastResult = "ERR " .. tostring(res):sub(1, 80)
+    end
+    if good then comm.sent = comm.sent + 1 else comm.failed = comm.failed + 1 end
+    Trace("SEND %s %s -> %s", ch, msg, comm.lastResult)
+end
+
+local function ShareStart(guid, spellID, total, dur, tick, age)
+    local me = PlainGUID("player")
+    if not me then return end
+    Send(string.format("1;S;%s;%s;%d;%d;%.2f;%.2f;%.2f", me, guid, spellID,
+        math.floor(total + 0.5), dur, tick, math.max(0, age)))
+end
+
+local function ShareStop(guid, spellID)
+    local me = PlainGUID("player")
+    if not me then return end
+    Send(string.format("1;R;%s;%s;%d", me, guid, spellID))
+end
+
+local function OnAddonMessage(prefix, text, channel, sender)
+    if issecret(prefix) or prefix ~= PREFIX then return end
+    if issecret(text) or type(text) ~= "string" then
+        comm.secret = comm.secret + 1
+        return
+    end
+    comm.recv = comm.recv + 1
+    Trace("RECV %s %s", issecret(sender) and "SECRET" or tostring(sender), text)
+    local v, kind, caster, target, id, rest = text:match("^(%d+);(%a);([^;]+);([^;]+);(%d+);?(.*)$")
+    if v ~= "1" then comm.bad = comm.bad + 1 return end
+    if caster == PlainGUID("player") then return end -- our own echo
+    if not db or not db.share then return end
+    local spellID = tonumber(id)
+    local okN, nm = pcall(C_Spell.GetSpellName, spellID)
+    if not okN or type(nm) ~= "string" or issecret(nm) then nm = tostring(id) end
+    local key = caster .. "@" .. nm
+    if kind == "S" then
+        local total, dur, tick, age = rest:match("^(%d+);([%d%.]+);([%d%.]+);([%d%.]+)$")
+        total, dur, tick, age = tonumber(total), tonumber(dur), tonumber(tick), tonumber(age)
+        if not (total and dur and tick and age) or dur <= 0 or total <= 0 then
+            comm.bad = comm.bad + 1
+            return
+        end
+        if age >= dur then return end
+        StartHot(target, key, spellID, GetTime() - age, dur, total, tick)
+        local h = hots[target] and hots[target][key]
+        if h then h.shared = true end
+    elseif kind == "R" then
+        local list = hots[target]
+        if list then
+            list[key] = nil
+            if not next(list) then hots[target] = nil end
+        end
+    else
+        comm.bad = comm.bad + 1
+    end
+end
+
 -- Out of combat the auras are the truth: rebuild timers from them.
 local function AurasReadable()
     if C_Secrets and C_Secrets.ShouldAurasBeSecret then
@@ -316,7 +409,11 @@ local function SyncUnitFromAuras(unit)
                 local total, _, tick = SpellAmount(id)
                 local cur = hots[guid] and hots[guid][name]
                 if cur and cur.spellID == id then total = cur.total end
-                if total then StartHot(guid, name, id, exp - dur, dur, total, tick) end
+                local changed = not cur or cur.spellID ~= id or math.abs(cur.start - (exp - dur)) > 0.5
+                if total then
+                    StartHot(guid, name, id, exp - dur, dur, total, tick)
+                    if changed then ShareStart(guid, id, total, dur, tick or DEFAULT_TICK, GetTime() - (exp - dur)) end
+                end
                 seen[name] = true
             end
         end
@@ -325,11 +422,14 @@ local function SyncUnitFromAuras(unit)
     if list then
         local now = GetTime()
         for name, h in pairs(list) do
-            if not seen[name] then
+            -- (other healers' HoTs aren't in our PLAYER-filtered auras)
+            if not seen[name] and not h.shared then
                 -- The aura drops in the same moment as its last tick, often
                 -- before the health event: land what's left so it flashes.
                 if h.landed < h.ticks and now >= h.start + h.dur - EARLY - 0.1 then
                     Land(guid, h, h.ticks - h.landed, "aura end", now)
+                else
+                    ShareStop(guid, h.spellID) -- gone early (dispelled, cancelled)
                 end
                 list[name] = nil
             end
@@ -680,6 +780,7 @@ local function OnCastSucceeded(castGUID, spellID)
     if not total then return end
     local now = GetTime()
     StartHot(guid, name, spellID, now, dur, total, tick)
+    ShareStart(guid, spellID, total, dur, tick or DEFAULT_TICK, 0)
     if tracing then
         local h = hots[guid][name]
         traceRef[guid] = now
@@ -700,12 +801,18 @@ f:RegisterEvent("SPELLS_CHANGED")
 f:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 f:RegisterEvent("UNIT_AURA")
 f:RegisterEvent("UNIT_HEALTH")
+if not (C_EventUtils and C_EventUtils.IsEventValid) or C_EventUtils.IsEventValid("CHAT_MSG_ADDON") then
+    f:RegisterEvent("CHAT_MSG_ADDON")
+end
 f:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")
 f:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 
 f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
     if event == "ADDON_LOADED" then
         if a1 ~= ADDON then return end
+        if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+            pcall(C_ChatInfo.RegisterAddonMessagePrefix, PREFIX)
+        end
         HoTForecastCharDB = HoTForecastCharDB or {}
         db = HoTForecastCharDB
         for k, v in pairs(DEFAULTS) do
@@ -727,6 +834,8 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
         OnCastSent(a2, a3, a4)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         OnCastSucceeded(a2, a3)
+    elseif event == "CHAT_MSG_ADDON" then
+        OnAddonMessage(a1, a2, a3, a4)
     elseif event == "UNIT_HEALTH" then
         if issecret(a1) or type(a1) ~= "string" then return end
         local guid = PlainGUID(a1)
@@ -810,6 +919,22 @@ SlashCmdList.HOTFORECAST = function(msg)
         else
             Print("usage: /hotf tickalpha 0-100")
         end
+    elseif cmd == "share" then
+        if rest == "on" or rest == "off" then
+            db.share = rest == "on"
+        else
+            db.share = not db.share
+        end
+        if not db.share then
+            for guid, list in pairs(hots) do
+                for key, h in pairs(list) do
+                    if h.shared then list[key] = nil end
+                end
+                if not next(list) then hots[guid] = nil end
+            end
+        end
+        Print("sharing " .. (db.share and "on: your HoTs go to the group and other users' show here."
+            or "off."))
     elseif cmd == "flash" then
         if rest == "on" or rest == "off" then
             db.flash = rest == "on"
@@ -851,6 +976,9 @@ SlashCmdList.HOTFORECAST = function(msg)
         local n, now = 0, GetTime()
         for _ in pairs(overlays) do n = n + 1 end
         Print(n .. " frames attached.")
+        Print(string.format("sharing %s, channel %s: sent %d, failed %d (last %s), received %d, unreadable %d, bad %d",
+            db.share and "on" or "off", GroupChannel() or "none", comm.sent, comm.failed,
+            comm.lastResult, comm.recv, comm.secret, comm.bad))
         for guid, list in pairs(hots) do
             for name, h in pairs(list) do
                 Print(string.format("%s %s: %d of %d left, %d/%d ticks landed, %.1fs left",
@@ -866,6 +994,6 @@ SlashCmdList.HOTFORECAST = function(msg)
             end
         end
     else
-        Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | color <r g b> | test | debug | trace [clear]")
+        Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | share [on|off] | color <r g b> | test | debug | trace [clear]")
     end
 end
