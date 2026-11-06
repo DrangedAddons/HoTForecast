@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.1
+- EllesmereUI party frames with Show Self First (or Last) on: your own frame now shows HoTs. It's a separate button that wasn't being picked up.
+
 ## 0.6.0
 - HoTs are shared between HoTForecast users in your group. Other healers' HoTs join your bars and are timed and flashed like your own. `/hotf share on|off` toggles it, and `/hotf debug` shows what was sent and received.
 

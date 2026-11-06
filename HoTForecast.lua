@@ -637,6 +637,13 @@ local function ScanButtons()
             end
         end
     end
+    -- With "Show Self First/Last" the player's party frame is this static
+    -- button, outside the header.
+    local selfBtn = _G.ERFPartySelfButton
+    if selfBtn then
+        local ov = Attach(selfBtn)
+        if ov then Layout(ov) end
+    end
     for _, u in ipairs(WEBBY_UNITS) do AttachWebby(_G["WebbyFrames_" .. u]) end
     for i = 1, 40 do
         local t = _G["WebbyFrames_RaidParty" .. i]
