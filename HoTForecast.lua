@@ -22,7 +22,8 @@ local HOTS = {
 local DEFAULTS = {
     enabled = true,
     color = { r = 0.55, g = 1.0, b = 0.75 },
-    alpha = 35,          -- percent
+    alpha = 35,          -- percent, the rest of the HoTs
+    tickAlpha = 65,      -- percent, the next tick
 }
 
 local db
@@ -141,11 +142,14 @@ local function StartHot(guid, name, spellID, start, dur, total)
                          tick = dur / ticks, spellID = spellID }
 end
 
--- Healing still to come from the remaining ticks, summed over my HoTs on guid.
+-- Healing still to come from the remaining ticks, summed over my HoTs on guid,
+-- plus the size of the soonest tick. HoTs ticking within 0.1s of each other
+-- count as one tick (their amounts add).
 local function Forecast(guid, now)
     local list = hots[guid]
-    if not list then return 0 end
+    if not list then return 0, 0 end
     local sum, any = 0, false
+    local nextAt, nextAmt = nil, 0
     for name, h in pairs(list) do
         local elapsed = now - h.start
         if elapsed >= h.dur then
@@ -153,12 +157,22 @@ local function Forecast(guid, now)
         else
             local done = math.floor(elapsed / h.tick)
             local left = h.ticks - done
-            if left > 0 then sum = sum + h.total * left / h.ticks end
+            if left > 0 then
+                local perTick = h.total / h.ticks
+                sum = sum + perTick * left
+                local at = h.start + (done + 1) * h.tick
+                if not nextAt or at < nextAt - 0.1 then
+                    nextAt, nextAmt = at, perTick
+                elseif at <= nextAt + 0.1 then
+                    nextAmt = nextAmt + perTick
+                    if at < nextAt then nextAt = at end
+                end
+            end
             any = true
         end
     end
     if not any then hots[guid] = nil end
-    return sum
+    return sum, nextAmt
 end
 
 -- Out of combat the auras are the truth: rebuild timers from them.
@@ -243,6 +257,7 @@ end
 
 local function ApplyColor(ov)
     local c = db.color
+    ov.tick:SetStatusBarColor(c.r, c.g, c.b, (db.tickAlpha or 65) / 100)
     ov.hot:SetStatusBarColor(c.r, c.g, c.b, (db.alpha or 35) / 100)
 end
 
@@ -284,7 +299,8 @@ local function Layout(ov)
         end
     end
     place(ov.spacer, health:GetStatusBarTexture())
-    place(ov.hot, ov.spacer:GetStatusBarTexture())
+    place(ov.tick, ov.spacer:GetStatusBarTexture())
+    place(ov.hot, ov.tick:GetStatusBarTexture())
 end
 
 local function Attach(button)
@@ -300,7 +316,8 @@ local function Attach(button)
     -- where its green ends.
     ov.spacer = NewBar(health, mask)
     ov.spacer:SetStatusBarColor(0, 0, 0, 0)
-    ov.hot = NewBar(health, mask)
+    ov.tick = NewBar(health, mask) -- next tick, brighter
+    ov.hot = NewBar(health, mask)  -- the rest
     if CreateUnitHealPredictionCalculator then
         local ok, calc = pcall(CreateUnitHealPredictionCalculator)
         if ok and calc then
@@ -332,6 +349,7 @@ end
 local function HideOverlay(ov)
     if ov.shown then
         ov.spacer:Hide()
+        ov.tick:Hide()
         ov.hot:Hide()
         ov.shown = false
     end
@@ -345,13 +363,15 @@ local function PaintOverlay(ov, now)
 
     if testMode then
         ov.spacer:SetMinMaxValues(0, 100); ov.spacer:SetValue(0)
-        ov.hot:SetMinMaxValues(0, 100); ov.hot:SetValue(30)
-        ov.spacer:Show(); ov.hot:Show(); ov.shown = true
+        ov.tick:SetMinMaxValues(0, 100); ov.tick:SetValue(10)
+        ov.hot:SetMinMaxValues(0, 100); ov.hot:SetValue(20)
+        ov.spacer:Show(); ov.tick:Show(); ov.hot:Show(); ov.shown = true
         return
     end
 
     local guid = PlainGUID(unit)
-    local amount = guid and Forecast(guid, now) or 0
+    local amount, nextTick = 0, 0
+    if guid then amount, nextTick = Forecast(guid, now) end
     if amount <= 0 then return HideOverlay(ov) end
     local dead = UnitIsDeadOrGhost(unit)
     if not issecret(dead) and dead then
@@ -370,10 +390,13 @@ local function PaintOverlay(ov, now)
         ov.spacer:SetMinMaxValues(0, UnitHealthMax(unit))
         ov.spacer:SetValue(0)
     end
-    ov.hot:SetMinMaxValues(0, UnitHealthMax(unit))
-    ov.hot:SetValue(amount)
+    local maxH = UnitHealthMax(unit)
+    ov.tick:SetMinMaxValues(0, maxH)
+    ov.tick:SetValue(nextTick)
+    ov.hot:SetMinMaxValues(0, maxH)
+    ov.hot:SetValue(math.max(0, amount - nextTick))
     if not ov.shown then
-        ov.spacer:Show(); ov.hot:Show(); ov.shown = true
+        ov.spacer:Show(); ov.tick:Show(); ov.hot:Show(); ov.shown = true
     end
 end
 
@@ -507,6 +530,15 @@ SlashCmdList.HOTFORECAST = function(msg)
         else
             Print("usage: /hotf alpha 0-100")
         end
+    elseif cmd == "tickalpha" then
+        local n = tonumber(rest)
+        if n and n >= 0 and n <= 100 then
+            db.tickAlpha = n
+            RefreshColors()
+            Print("next-tick opacity " .. n .. "%.")
+        else
+            Print("usage: /hotf tickalpha 0-100")
+        end
     elseif cmd == "color" then
         local r, g, b = rest:match("^([%d%.]+)%s+([%d%.]+)%s+([%d%.]+)$")
         r, g, b = tonumber(r), tonumber(g), tonumber(b)
@@ -521,7 +553,7 @@ SlashCmdList.HOTFORECAST = function(msg)
     elseif cmd == "test" then
         testMode = not testMode
         ScanButtons()
-        Print(testMode and "test bars on (30% on every frame). /hotf test again to stop."
+        Print(testMode and "test bars on (10% next tick + 20% rest on every frame). /hotf test again to stop."
             or "test bars off.")
     elseif cmd == "debug" then
         local n, now = 0, GetTime()
@@ -538,6 +570,6 @@ SlashCmdList.HOTFORECAST = function(msg)
             Print(string.format("spell %d: %d over %ss", id, c.total, c.dur))
         end
     else
-        Print("/hotf on | off | alpha <0-100> | color <r g b> | test | debug")
+        Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | color <r g b> | test | debug")
     end
 end
