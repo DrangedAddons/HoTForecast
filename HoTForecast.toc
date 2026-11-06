@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: HoTForecast
-## Notes: Faint bar on EllesmereUI raid and party frames showing how much your active HoTs will still heal, after the incoming-heal prediction.
+## Notes: Faint bars on EllesmereUI raid and party frames showing what your own HoTs (any class) will still heal, with the next tick brighter.
 ## Author: Dranged
-## Version: 0.2.0
+## Version: 0.3.0
 ## Dependencies: EllesmereUIRaidFrames
 ## SavedVariablesPerCharacter: HoTForecastCharDB
 

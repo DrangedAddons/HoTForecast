@@ -1,5 +1,5 @@
 -- HoTForecast: a faint bar after EllesmereUI's incoming-heal prediction showing
--- what your own HoTs will still heal if they run their course.
+-- what your own HoTs (any class) will still heal if they run their course.
 --
 -- Forever blocks aura reads in combat, so HoTs are timed from your own casts:
 -- UNIT_SPELLCAST_SENT gives the target's name, SUCCEEDED confirms the cast, and
@@ -13,11 +13,10 @@
 local ADDON = ...
 local issecret = issecretvalue or function() return false end
 
--- HoTs this addon tracks, by spell name (all ranks). tick = seconds per tick.
-local HOTS = {
-    ["Rejuvenation"] = { tick = 3 },
-    ["Regrowth"]     = { tick = 3 },
-}
+-- Any spell of yours whose description has a healing "<n> over <d> sec" part
+-- counts as a HoT: Rejuvenation, Regrowth, Renew and whatever else Forever has.
+-- Ticks are assumed 3 sec unless the text says "every <t> sec".
+local DEFAULT_TICK = 3
 
 local DEFAULTS = {
     enabled = true,
@@ -41,52 +40,96 @@ end
 -- Spell amounts from the description
 ------------------------------------------------------------------------------
 
--- Returns total, duration from the HoT part of a description, or nil.
--- Regrowth: "Heals a friendly target for 197 to 220 and another 295 over 27 sec."
--- The last "<n> over <d> sec" is the HoT part.
+-- Returns total, duration, tick from the healing-over-time part of a
+-- description, or nil. Works per sentence: the sentence must mention healing
+-- and not damage, which skips DoTs, drains and bandages ("Heals 66 damage
+-- over 6 sec", a channel that breaks on damage). Regrowth:
+-- "Heals a friendly target for 197 to 220 and another 295 over 27 sec."
+-- The last "<n> over <d> sec" in a healing sentence is the HoT part.
+local HEAL_WORDS = { heal = true, heals = true, healing = true, healed = true }
+
+local function IsHealingSentence(low)
+    if low:find("damage", 1, true) then return false end
+    for w in low:gmatch("%a+") do
+        if HEAL_WORDS[w] then return true end -- "health" is not a heal word
+    end
+    return false
+end
+
 local function ParseDesc(text)
-    if type(text) ~= "string" or issecret(text) then return nil end
-    local total, dur
-    for t, d in text:gmatch("([%d,%.]+) over ([%d%.]+) sec") do
-        total, dur = t, d
+    if type(text) ~= "string" or issecret(text) or text == "" then return nil end
+    local total, dur, tick
+    for sentence in (text .. ". "):gmatch("(.-%.)%s") do
+        local low = sentence:lower()
+        if IsHealingSentence(low) then
+            for t, d, unit in low:gmatch("([%d,%.]+) over ([%d%.]+) (%a+)") do
+                local secs = tonumber(d)
+                if secs and (unit == "sec" or unit == "secs" or unit == "seconds") then
+                    total, dur = t, secs
+                elseif secs and (unit == "min" or unit == "mins" or unit == "minutes") then
+                    total, dur = t, secs * 60
+                end
+            end
+            local every = low:match("every ([%d%.]+) sec")
+            if every then tick = tonumber(every) end
+        end
     end
     if not total then return nil end
     total = tonumber((total:gsub(",", "")))
-    dur = tonumber(dur)
-    if not total or not dur or dur <= 0 then return nil end
-    return total, dur
+    if not total or total <= 0 or not dur or dur <= 0 then return nil end
+    if not tick or tick <= 0 or tick > dur then tick = DEFAULT_TICK end
+    return total, dur, tick
 end
 
 -- Read the description fresh when possible (it follows gear and buffs),
--- else use the last good read for that rank.
+-- else use the last good read for that rank. false = known not a HoT.
 local function SpellAmount(spellID)
+    if issecret(spellID) or type(spellID) ~= "number" then return nil end
+    if descCache[spellID] == false then return nil end
     local ok, text = pcall(C_Spell.GetSpellDescription, spellID)
-    if ok then
-        local total, dur = ParseDesc(text)
+    if ok and type(text) == "string" and not issecret(text) and text ~= "" then
+        local total, dur, tick = ParseDesc(text)
         if total then
-            descCache[spellID] = { total = total, dur = dur }
-            return total, dur
+            descCache[spellID] = { total = total, dur = dur, tick = tick }
+            return total, dur, tick
+        elseif not descCache[spellID] then
+            descCache[spellID] = false
+            return nil
         end
     end
     local c = descCache[spellID]
-    if c then return c.total, c.dur end
+    if c then return c.total, c.dur, c.tick end
     return nil
 end
 
+-- Spell name if spellID is one of your HoTs. Ranks share a name, so a recast
+-- of a lower rank replaces the higher one, as the game does.
 local function HotName(spellID)
-    if issecret(spellID) or type(spellID) ~= "number" then return nil end
+    if not SpellAmount(spellID) then return nil end
     local ok, name = pcall(C_Spell.GetSpellName, spellID)
-    if ok and type(name) == "string" and not issecret(name) and HOTS[name] then
-        return name
-    end
+    if ok and type(name) == "string" and not issecret(name) then return name end
     return nil
 end
 
+-- Cache every spellbook spell out of combat, in case descriptions can't be
+-- read mid-fight.
 local function PrewarmSpells()
-    for name in pairs(HOTS) do
-        local ok, info = pcall(C_Spell.GetSpellInfo, name)
-        if ok and type(info) == "table" and not issecret(info.spellID) and info.spellID then
-            SpellAmount(info.spellID)
+    local SB = C_SpellBook
+    if not (SB and SB.GetNumSpellBookSkillLines and SB.GetSpellBookSkillLineInfo
+            and SB.GetSpellBookItemInfo and Enum.SpellBookSpellBank) then return end
+    local okN, lines = pcall(SB.GetNumSpellBookSkillLines)
+    if not okN or type(lines) ~= "number" then return end
+    for i = 1, lines do
+        local okL, line = pcall(SB.GetSpellBookSkillLineInfo, i)
+        if okL and type(line) == "table" and line.itemIndexOffset and line.numSpellBookItems then
+            for j = line.itemIndexOffset + 1, line.itemIndexOffset + line.numSpellBookItems do
+                local okI, item = pcall(SB.GetSpellBookItemInfo, j, Enum.SpellBookSpellBank.Player)
+                if okI and type(item) == "table" and type(item.spellID) == "number"
+                   and not issecret(item.spellID) then
+                    descCache[item.spellID] = nil  -- re-read: gear may have changed
+                    SpellAmount(item.spellID)
+                end
+            end
         end
     end
 end
@@ -134,8 +177,8 @@ end
 -- HoT timers
 ------------------------------------------------------------------------------
 
-local function StartHot(guid, name, spellID, start, dur, total)
-    local tick = HOTS[name].tick
+local function StartHot(guid, name, spellID, start, dur, total, tick)
+    tick = tick or DEFAULT_TICK
     local ticks = math.max(1, math.floor(dur / tick + 0.5))
     hots[guid] = hots[guid] or {}
     hots[guid][name] = { start = start, dur = dur, total = total, ticks = ticks,
@@ -195,10 +238,10 @@ local function SyncUnitFromAuras(unit)
         if not issecret(id) and not issecret(exp) and not issecret(dur) then
             local name = HotName(id)
             if name and dur and dur > 0 and exp and exp > 0 then
-                local total = SpellAmount(id)
+                local total, _, tick = SpellAmount(id)
                 local cur = hots[guid] and hots[guid][name]
                 if cur and cur.spellID == id then total = cur.total end
-                if total then StartHot(guid, name, id, exp - dur, dur, total) end
+                if total then StartHot(guid, name, id, exp - dur, dur, total, tick) end
                 seen[name] = true
             end
         end
@@ -437,17 +480,15 @@ local function OnCastSucceeded(castGUID, spellID)
     if issecret(castGUID) or not castGUID then return end
     local targetName = pendingCasts[castGUID]
     pendingCasts[castGUID] = nil
+    -- No target name means an untargeted (e.g. party-wide) cast: skip it
+    -- rather than guess who it landed on.
     local unit = UnitFromCastTarget(targetName)
-    if not unit and targetName == nil then
-        -- No target name: an untargeted cast lands on yourself.
-        unit = "player"
-    end
     if not unit then return end
     local guid = PlainGUID(unit)
     if not guid then return end
-    local total, dur = SpellAmount(spellID)
+    local total, dur, tick = SpellAmount(spellID)
     if not total then return end
-    StartHot(guid, name, spellID, GetTime(), dur, total)
+    StartHot(guid, name, spellID, GetTime(), dur, total, tick)
 end
 
 f:RegisterEvent("ADDON_LOADED")
@@ -567,7 +608,11 @@ SlashCmdList.HOTFORECAST = function(msg)
             end
         end
         for id, c in pairs(descCache) do
-            Print(string.format("spell %d: %d over %ss", id, c.total, c.dur))
+            if c then
+                local okN, nm = pcall(C_Spell.GetSpellName, id)
+                Print(string.format("HoT %s (%d): %d over %ss, tick %ss",
+                    okN and type(nm) == "string" and nm or "?", id, c.total, c.dur, c.tick))
+            end
         end
     else
         Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | color <r g b> | test | debug")
