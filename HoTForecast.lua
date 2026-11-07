@@ -10,7 +10,7 @@
 -- here; they go straight into StatusBar min/max/value, which accept secrets.
 -- The forecast itself is a plain number.
 
-local ADDON = ...
+local ADDON, HF = ...
 local issecret = issecretvalue or function() return false end
 
 -- Any spell of yours whose description has a healing "<n> over <d> sec" part
@@ -25,6 +25,11 @@ local DEFAULTS = {
     tickAlpha = 65,      -- percent, the next tick
     flash = true,        -- pop the healed chunk when a tick goes off
     share = true,        -- send your HoTs to the group and show other users'
+    -- Which frames get the bars. Each covers EllesmereUI's and WebbyFrames'
+    -- frame for that unit; "party" is every party and raid frame.
+    show = { party = true, player = true, target = true, targettarget = true,
+             focus = true, focustarget = true, pet = true },
+    minimap = { hide = false },
 }
 
 local db
@@ -579,7 +584,9 @@ end
 -- level: our bars' frame level above the health bar. EllesmereUI's own
 -- prediction sits at +3; WebbyFrames' at +1 with its frame art above that.
 -- shapeMask: the frame's health-shape mask, if it has one (WebbyFrames).
-local function Attach(button, health, level, shapeMask)
+-- cat: the db.show key that switches this frame. predOn: for frames whose
+-- incoming-heal bar can be off, returns whether it's drawn (no spacer if not).
+local function Attach(button, health, level, shapeMask, cat, predOn)
     local ov = overlays[button]
     if ov then return ov end
     health = health or FindHealthBar(button)
@@ -588,7 +595,7 @@ local function Attach(button, health, level, shapeMask)
     local mask = health:CreateMaskTexture()
     mask:SetAllPoints(health)
     mask:SetTexture("Interface\\Buttons\\WHITE8X8", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE", "NEAREST")
-    ov = { button = button, health = health, mask = mask }
+    ov = { button = button, health = health, mask = mask, cat = cat or "party", predOn = predOn }
     -- Invisible stand-in for EllesmereUI's incoming-heal bar, so ours starts
     -- where its green ends.
     ov.spacer = NewBar(health, mask, level, shapeMask)
@@ -618,10 +625,29 @@ end
 local WEBBY_UNITS = { "player", "target", "targettarget", "focus", "focustarget", "pet",
                       "party1", "party2", "party3", "party4" }
 
-local function AttachWebby(f)
+local function AttachWebby(f, cat)
     if not f or type(f.hp) ~= "table" or not f.hp.GetStatusBarTexture then return end
     local shape = f.hpMaskOn and f.hpMask or nil
-    local ov = Attach(f, f.hp, 1, shape)
+    local ov = Attach(f, f.hp, 1, shape, cat)
+    if ov then Layout(ov) end
+end
+
+-- EllesmereUI unit frames: EllesmereUIUnitFrames_<Name>, health bar in
+-- .Health, live unit in ._euiUnit. Their incoming-heal bar is opt-in per
+-- frame (damageAbsorb._predOn); text sits at +15, so ours at +3 stays under it.
+local EUI_UNIT_FRAMES = {
+    Player = "player", Target = "target", TargetTarget = "targettarget",
+    Focus = "focus", FocusTarget = "focustarget", Pet = "pet",
+}
+
+local function AttachEUIUnit(f, cat)
+    if not f or overlays[f] then return end
+    local health = f.Health
+    if type(health) ~= "table" or not health.GetStatusBarTexture then return end
+    local ab = f.HealthPrediction and f.HealthPrediction.damageAbsorb
+    local shape = ab and ab._blizzMaskOn and health._blizzMask or nil
+    local predOn = ab and function() return ab._predOn and true or false end or nil
+    local ov = Attach(f, health, 3, shape, cat, predOn)
     if ov then Layout(ov) end
 end
 
@@ -632,7 +658,7 @@ local function ScanButtons()
             for i = 1, 40 do
                 local btn = hdr[i]
                 if not btn then break end
-                local ov = Attach(btn)
+                local ov = Attach(btn, nil, nil, nil, "party")
                 if ov then Layout(ov) end
             end
         end
@@ -641,21 +667,29 @@ local function ScanButtons()
     -- button, outside the header.
     local selfBtn = _G.ERFPartySelfButton
     if selfBtn then
-        local ov = Attach(selfBtn)
+        local ov = Attach(selfBtn, nil, nil, nil, "party")
         if ov then Layout(ov) end
     end
-    for _, u in ipairs(WEBBY_UNITS) do AttachWebby(_G["WebbyFrames_" .. u]) end
+    for _, u in ipairs(WEBBY_UNITS) do
+        AttachWebby(_G["WebbyFrames_" .. u], u:match("^party%d$") and "party" or u)
+    end
     for i = 1, 40 do
         local t = _G["WebbyFrames_RaidParty" .. i]
         if not t then break end
-        AttachWebby(t)
+        AttachWebby(t, "party")
+    end
+    for name, cat in pairs(EUI_UNIT_FRAMES) do
+        AttachEUIUnit(_G["EllesmereUIUnitFrames_" .. name], cat)
     end
 end
 
 -- WebbyFrames keeps the live unit in .wfUnit (its party frames can switch
--- unit); everything else uses the secure "unit" attribute.
+-- unit), EllesmereUI's unit frames in ._euiUnit (vehicle swaps); everything
+-- else uses the secure "unit" attribute.
 local function OverlayUnit(btn)
     local u = btn.wfUnit
+    if type(u) == "string" and not issecret(u) then return u end
+    u = btn._euiUnit
     if type(u) == "string" and not issecret(u) then return u end
     return btn:GetAttribute("unit")
 end
@@ -671,7 +705,7 @@ end
 
 local function PaintOverlay(ov, now)
     local btn = ov.button
-    if not db.enabled or not btn:IsVisible() then return HideOverlay(ov) end
+    if not db.enabled or db.show[ov.cat] == false or not btn:IsVisible() then return HideOverlay(ov) end
     local unit = OverlayUnit(btn)
     if type(unit) ~= "string" or not UnitExists(unit) then return HideOverlay(ov) end
 
@@ -721,6 +755,7 @@ local function PaintOverlay(ov, now)
 
     -- Spacer = incoming heals on the same scale as EllesmereUI reads them.
     local calc = ov.calc
+    if ov.predOn and not ov.predOn() then calc = nil end
     if calc and UnitGetDetailedHealPrediction and pcall(UnitGetDetailedHealPrediction, unit, nil, calc) then
         ov.spacer:SetMinMaxValues(0, calc:GetMaximumHealth())
         local inc = calc:GetIncomingHeals()
@@ -823,10 +858,16 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
         HoTForecastCharDB = HoTForecastCharDB or {}
         db = HoTForecastCharDB
         for k, v in pairs(DEFAULTS) do
-            if db[k] == nil then
-                db[k] = type(v) == "table" and { r = v.r, g = v.g, b = v.b } or v
+            if type(v) == "table" then
+                if type(db[k]) ~= "table" then db[k] = {} end
+                for k2, v2 in pairs(v) do
+                    if db[k][k2] == nil then db[k][k2] = v2 end
+                end
+            elseif db[k] == nil then
+                db[k] = v
             end
         end
+        HF.db = db
         return
     end
     if not db then return end
@@ -897,22 +938,108 @@ local function RefreshColors()
     for _, ov in pairs(overlays) do ApplyColor(ov) end
 end
 
+------------------------------------------------------------------------------
+-- API for the settings window and minimap button (Config.lua, Minimap.lua)
+------------------------------------------------------------------------------
+
+HF.SHOW_KEYS = { "party", "player", "target", "targettarget", "focus", "focustarget", "pet" }
+HF.SHOW_LABELS = {
+    party = "Party and raid frames", player = "Player", target = "Target",
+    targettarget = "Target of target", focus = "Focus", focustarget = "Focus target", pet = "Pet",
+}
+
+function HF.SetEnabled(on)
+    db.enabled = on and true or false
+    PaintAll()
+end
+
+function HF.SetAlpha(n)
+    db.alpha = n
+    RefreshColors()
+end
+
+function HF.SetTickAlpha(n)
+    db.tickAlpha = n
+    RefreshColors()
+end
+
+function HF.SetColor(c)
+    db.color = { r = c.r, g = c.g, b = c.b }
+    RefreshColors()
+end
+
+function HF.SetFlash(on)
+    db.flash = on and true or false
+end
+
+function HF.SetShare(on)
+    db.share = on and true or false
+    if db.share then return end
+    for guid, list in pairs(hots) do
+        for key, h in pairs(list) do
+            if h.shared then list[key] = nil end
+        end
+        if not next(list) then hots[guid] = nil end
+    end
+    PaintAll()
+end
+
+function HF.SetShown(key, on)
+    db.show[key] = on and true or false
+    PaintAll()
+end
+
+function HF.IsTesting() return testMode end
+
+function HF.SetTest(on)
+    testMode = on and true or false
+    ScanButtons()
+    PaintAll()
+end
+
+-- Back to the defaults. The minimap button keeps its place and visibility.
+function HF.ResetAll()
+    for k, v in pairs(DEFAULTS) do
+        if k ~= "minimap" then
+            if type(v) == "table" then
+                db[k] = {}
+                for k2, v2 in pairs(v) do db[k][k2] = v2 end
+            else
+                db[k] = v
+            end
+        end
+    end
+    HF.SetShare(db.share)
+    RefreshColors()
+    PaintAll()
+end
+
+------------------------------------------------------------------------------
+-- Slash command
+------------------------------------------------------------------------------
+
+local function OnOff(rest, cur)
+    if rest == "on" then return true elseif rest == "off" then return false end
+    return not cur
+end
+
 SLASH_HOTFORECAST1 = "/hotf"
 SLASH_HOTFORECAST2 = "/hotforecast"
 SlashCmdList.HOTFORECAST = function(msg)
     if not db then return end
     local cmd, rest = (msg or ""):lower():match("^%s*(%S*)%s*(.-)%s*$")
-    if cmd == "on" or cmd == "off" then
-        db.enabled = cmd == "on"
+    if cmd == "" or cmd == "config" or cmd == "options" then
+        if HF.ToggleConfig then HF.ToggleConfig() end
+    elseif cmd == "on" or cmd == "off" then
+        HF.SetEnabled(cmd == "on")
         Print(db.enabled and "on." or "off.")
     elseif cmd == "toggle" then
-        db.enabled = not db.enabled
+        HF.SetEnabled(not db.enabled)
         Print(db.enabled and "on." or "off.")
     elseif cmd == "alpha" then
         local n = tonumber(rest)
         if n and n >= 0 and n <= 100 then
-            db.alpha = n
-            RefreshColors()
+            HF.SetAlpha(n)
             Print("opacity " .. n .. "%.")
         else
             Print("usage: /hotf alpha 0-100")
@@ -920,49 +1047,31 @@ SlashCmdList.HOTFORECAST = function(msg)
     elseif cmd == "tickalpha" then
         local n = tonumber(rest)
         if n and n >= 0 and n <= 100 then
-            db.tickAlpha = n
-            RefreshColors()
+            HF.SetTickAlpha(n)
             Print("next-tick opacity " .. n .. "%.")
         else
             Print("usage: /hotf tickalpha 0-100")
         end
     elseif cmd == "share" then
-        if rest == "on" or rest == "off" then
-            db.share = rest == "on"
-        else
-            db.share = not db.share
-        end
-        if not db.share then
-            for guid, list in pairs(hots) do
-                for key, h in pairs(list) do
-                    if h.shared then list[key] = nil end
-                end
-                if not next(list) then hots[guid] = nil end
-            end
-        end
+        HF.SetShare(OnOff(rest, db.share))
         Print("sharing " .. (db.share and "on: your HoTs go to the group and other users' show here."
             or "off."))
     elseif cmd == "flash" then
-        if rest == "on" or rest == "off" then
-            db.flash = rest == "on"
-        else
-            db.flash = not db.flash
-        end
+        HF.SetFlash(OnOff(rest, db.flash))
         Print("tick flash " .. (db.flash and "on." or "off."))
     elseif cmd == "color" then
         local r, g, b = rest:match("^([%d%.]+)%s+([%d%.]+)%s+([%d%.]+)$")
         r, g, b = tonumber(r), tonumber(g), tonumber(b)
         if r and g and b then
             if r > 1 or g > 1 or b > 1 then r, g, b = r / 255, g / 255, b / 255 end
-            db.color = { r = r, g = g, b = b }
-            RefreshColors()
+            HF.SetColor({ r = r, g = g, b = b })
             Print(string.format("colour %.2f %.2f %.2f.", r, g, b))
         else
             Print("usage: /hotf color <r> <g> <b>  (0-1 or 0-255)")
         end
     elseif cmd == "test" then
-        testMode = not testMode
-        ScanButtons()
+        HF.SetTest(not testMode)
+        if HF.RefreshConfig then HF.RefreshConfig() end
         Print(testMode and "test bars on (10% next tick + 20% rest on every frame). /hotf test again to stop."
             or "test bars off.")
     elseif cmd == "trace" then
@@ -1001,6 +1110,6 @@ SlashCmdList.HOTFORECAST = function(msg)
             end
         end
     else
-        Print("/hotf on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | share [on|off] | color <r g b> | test | debug | trace [clear]")
+        Print("/hotf opens the settings. Also: on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | share [on|off] | color <r g b> | test | debug | trace [clear]")
     end
 end

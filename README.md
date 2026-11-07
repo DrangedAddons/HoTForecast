@@ -9,7 +9,17 @@ After the usual incoming-heal bar it draws:
 
 When a tick lands, the health rises into the bright segment, the chunk that was healed flashes, and the next tick starts from the new edge.
 
-Works with **EllesmereUI** raid and party frames and with **WebbyFrames** (player, target, target of target, focus, focus target, pet, party frames and the raid-style party tiles). You need at least one of the two.
+Works with **EllesmereUI** (raid and party frames, and the player, target, target of target, focus, focus target and pet frames) and with **WebbyFrames** (the same unit frames, its party frames and the raid-style party tiles). You need at least one of the two.
+
+## Settings
+
+`/hotf`, the minimap button, or Options > AddOns > HoTForecast opens the settings window:
+
+- turn the forecast, the tick flash and HoT sharing on or off
+- bar colour, and the opacity of the next tick and the rest of the HoT
+- **Show on**: which frames get the bars (party and raid, player, target, target of target, focus, focus target, pet)
+- the minimap button
+- Test bars, to preview on every frame, and Reset all
 
 ## Which HoTs
 
@@ -26,7 +36,7 @@ Every HoTForecast user shares their HoTs with the group over addon messages, so 
 
 ## Commands
 
-`/hotf` (or `/hotforecast`):
+`/hotf` (or `/hotforecast`) on its own opens the settings. The settings can also be changed from chat:
 
 | Command | What it does |
 |---|---|

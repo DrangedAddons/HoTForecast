@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+- Settings window: `/hotf`, the minimap button, the addon compartment, or Options > AddOns > HoTForecast. Everything the slash commands did is there, plus Test bars and Reset all.
+- Show on: switch the bars on or off for party and raid frames, player, target, target of target, focus, focus target and pet. Each covers both EllesmereUI and WebbyFrames.
+- EllesmereUI unit frames (player, target, target of target, focus, focus target, pet) show the bars too. If EllesmereUI's own heal prediction is off on a frame, the HoT bars start right at the health edge.
+- New icon, also used for the minimap button.
+
 ## 0.6.1
 - EllesmereUI party frames with Show Self First (or Last) on: your own frame now shows HoTs. It's a separate button that wasn't being picked up.
 
