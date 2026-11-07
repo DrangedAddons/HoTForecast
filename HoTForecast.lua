@@ -36,7 +36,7 @@ local DEFAULTS = {
 
 local db
 local hots = {}          -- guid -> spellName -> { start, dur, total, ticks, tick, spellID }
-local pendingCasts = {}  -- castGUID -> target name from SENT
+local pendingCasts = {}  -- castGUID -> { name = target name from SENT, unit = unit found then }
 local descCache = {}     -- spellID -> { total, dur }
 local overlays = setmetatable({}, { __mode = "k" }) -- button -> overlay
 local testMode = false
@@ -889,6 +889,28 @@ f:SetScript("OnUpdate", function(_, dt)
     end
 end)
 
+-- The unit a cast went to when its name is secret: the frame of ours under
+-- the mouse (click-casting, mouseover macros), else a group unit or pet that
+-- is your target. Returns unit, how it was found.
+local function SecretTargetUnit()
+    for btn in pairs(overlays) do
+        if btn:IsVisible() then
+            local ok, over = pcall(btn.IsMouseOver, btn)
+            if ok and not issecret(over) and over then
+                local u = OverlayUnit(btn)
+                if type(u) == "string" and UnitExists(u) and PlainGUID(u) then return u, "frame" end
+            end
+        end
+    end
+    for _, u in ipairs(GroupUnits()) do
+        if UnitExists(u) then
+            local ok, same = pcall(UnitIsUnit, u, "target")
+            if ok and not issecret(same) and same and PlainGUID(u) then return u, "target" end
+        end
+    end
+    return nil
+end
+
 -- What happened to the last HoT cast, for /hotf debug.
 local lastCast
 
@@ -924,28 +946,42 @@ local function OnCastSent(targetName, castGUID, spellID)
         lastCast.result = "cast id " .. Show(castGUID)
         return
     end
-    pendingCasts[castGUID] = targetName
+    local entry = { name = targetName }
+    -- In combat the name is secret when the target isn't a player (pets).
+    -- Find the unit now, while the mouse is still where the cast came from.
+    if issecret(targetName) then
+        entry.unit, entry.via = SecretTargetUnit()
+    end
+    pendingCasts[castGUID] = entry
 end
 
 local function OnCastSucceeded(castGUID, spellID)
     local name = HotName(spellID)
     if not name then return end
     if issecret(castGUID) or not castGUID then return end
-    local targetName = pendingCasts[castGUID]
+    local entry = pendingCasts[castGUID]
     pendingCasts[castGUID] = nil
     local lc = lastCast or {}
     lastCast = lc
     lc.spell = name
     -- No target name means an untargeted (e.g. party-wide) cast: skip it
     -- rather than guess who it landed on.
-    local unit = UnitFromCastTarget(targetName)
-    if not unit then lc.result = "no unit matched that name" return end
+    local unit
+    if entry and issecret(entry.name) then
+        unit = entry.unit
+        if not unit then lc.result = "secret name, no frame under the mouse or matching target" return end
+        lc.via = entry.via
+    else
+        unit = UnitFromCastTarget(entry and entry.name)
+        if not unit then lc.result = "no unit matched that name" return end
+    end
     lc.unit = unit
     local guid = PlainGUID(unit)
     if not guid then lc.result = "unit " .. unit .. " has GUID " .. Show(UnitGUID(unit)) return end
     local total, dur, tick = SpellAmount(spellID)
     if not total then lc.result = "no amount in the description" return end
-    lc.result = string.format("tracked on %s: %d over %ss", unit, total, tostring(dur))
+    lc.result = string.format("tracked on %s%s: %d over %ss", unit, lc.via and (" (via " .. lc.via .. ")") or "",
+        total, tostring(dur))
     local now = GetTime()
     StartHot(guid, name, spellID, now, dur, total, tick)
     ShareStart(guid, spellID, total, dur, tick or DEFAULT_TICK, 0)

@@ -2,7 +2,7 @@
 ## Title: HoTForecast
 ## Notes: Shows what HoTs will still heal on EllesmereUI and WebbyFrames frames: the next tick brighter, the rest faint. Any class; shares HoTs between HoTForecast users.
 ## Author: Dranged
-## Version: 0.9.3
+## Version: 0.9.4
 ## OptionalDeps: EllesmereUIRaidFrames, EllesmereUIUnitFrames, WebbyFrames
 ## X-DrangedAddons-Games: _forever_
 ## IconTexture: Interface\AddOns\HoTForecast\icon

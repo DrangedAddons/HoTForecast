@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.9.4
+- HoTs on pets in combat. The game hides the target's name when you cast on a pet in combat, so the HoT was dropped. Now HoTForecast takes the frame under your mouse when you cast (click-casting, mouseover macros), or the pet you have targeted.
+
 ## 0.9.3
 - The last 10 HoT casts and what the game showed about the target and pets are saved, for bug reports.
 
