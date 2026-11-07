@@ -236,8 +236,10 @@ local function Build()
     local note = Text(frame, "EllesmereUI and WebbyFrames frames.", "GameFontDisableSmall")
     note:SetPoint("TOPLEFT", R + 4, -68 - #HF.SHOW_KEYS * 26 - 4)
 
+    Check(frame, "Direct heals on pets", function() return db.petDirect end, HF.SetPetDirect, R, -284,
+        "Pet frames have no incoming-heal bar of their own, so HoTForecast draws one in green before the HoT bars.")
     Check(frame, "Show minimap button", function() return not db.minimap.hide end,
-        function(on) if HF.SetMinimapShown then HF.SetMinimapShown(on) end end, R, -284)
+        function(on) if HF.SetMinimapShown then HF.SetMinimapShown(on) end end, R, -316)
 
     -- Bottom row.
     local test = Button(frame, "", 110, 24, nil)

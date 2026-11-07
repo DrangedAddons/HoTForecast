@@ -26,6 +26,7 @@ local DEFAULTS = {
     flash = true,        -- pop the healed chunk when a tick goes off
     share = true,        -- send your HoTs to the group
     showOthers = true,   -- show other HoTForecast users' HoTs (false: only yours)
+    petDirect = true,    -- draw incoming direct heals on pet frames that have no such bar
     -- Which frames get the bars. Each covers EllesmereUI's and WebbyFrames'
     -- frame for that unit; "party" is every party and raid frame.
     show = { party = true, player = true, target = true, targettarget = true,
@@ -491,7 +492,14 @@ local function NewBar(health, mask, level, shapeMask)
     return bar
 end
 
+-- Our own incoming-heal bar, on frames with none: EllesmereUI's green.
+local DIRECT_COLOR = { r = 102 / 255, g = 243 / 255, b = 102 / 255, a = 0.6 }
+
 local function ApplyColor(ov)
+    if ov.ownPred then
+        local d = DIRECT_COLOR
+        ov.spacer:SetStatusBarColor(d.r, d.g, d.b, d.a)
+    end
     local c = db.color
     ov.tick:SetStatusBarColor(c.r, c.g, c.b, (db.tickAlpha or 65) / 100)
     ov.hot:SetStatusBarColor(c.r, c.g, c.b, (db.alpha or 35) / 100)
@@ -590,7 +598,9 @@ end
 -- shapeMask: the frame's health-shape mask, if it has one (WebbyFrames).
 -- cat: the db.show key that switches this frame. predOn: for frames whose
 -- incoming-heal bar can be off, returns whether it's drawn (no spacer if not).
-local function Attach(button, health, level, shapeMask, cat, predOn)
+-- ownPred: the frame draws no incoming heals of its own, so the spacer is
+-- shown as our direct-heal bar (db.petDirect).
+local function Attach(button, health, level, shapeMask, cat, predOn, ownPred)
     local ov = overlays[button]
     if ov then return ov end
     health = health or FindHealthBar(button)
@@ -599,7 +609,8 @@ local function Attach(button, health, level, shapeMask, cat, predOn)
     local mask = health:CreateMaskTexture()
     mask:SetAllPoints(health)
     mask:SetTexture("Interface\\Buttons\\WHITE8X8", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE", "NEAREST")
-    ov = { button = button, health = health, mask = mask, cat = cat or "party", predOn = predOn }
+    ov = { button = button, health = health, mask = mask, cat = cat or "party", predOn = predOn,
+           ownPred = ownPred }
     -- Invisible stand-in for EllesmereUI's incoming-heal bar, so ours starts
     -- where its green ends.
     ov.spacer = NewBar(health, mask, level, shapeMask)
@@ -629,11 +640,64 @@ end
 local WEBBY_UNITS = { "player", "target", "targettarget", "focus", "focustarget", "pet",
                       "party1", "party2", "party3", "party4" }
 
-local function AttachWebby(f, cat)
+local function AttachWebby(f, cat, ownPred, shape)
     if not f or type(f.hp) ~= "table" or not f.hp.GetStatusBarTexture then return end
-    local shape = f.hpMaskOn and f.hpMask or nil
-    local ov = Attach(f, f.hp, 1, shape, cat)
+    if shape == nil then shape = f.hpMaskOn and f.hpMask or nil end
+    local ov = Attach(f, f.hp, 1, shape or nil, cat, nil, ownPred)
     if ov then Layout(ov) end
+end
+
+-- WebbyFrames pets beyond the main pet frame: the minis under the party
+-- frames (WebbyFrames_partypet<i>) and the raid-style pet tiles
+-- (WebbyFrames_RaidPartyPet<i>). Neither draws incoming heals.
+local function AttachWebbyPets()
+    for i = 1, 4 do
+        local m = _G["WebbyFrames_partypet" .. i]
+        -- The mini's health shape mask gets its texture on the first paint;
+        -- before that it would hide our bars, so wait for it.
+        if m and not overlays[m] and m.hpTex then AttachWebby(m, "pet", true, m.hpMask or false) end
+    end
+    for i = 1, 40 do
+        local t = _G["WebbyFrames_RaidPartyPet" .. i]
+        if not t then break end
+        AttachWebby(t, "pet", true, false)
+    end
+end
+
+-- EllesmereUI raid-frame pets: the pet header (ERFPetHeader), and with
+-- Beside Owner an unnamed button under each party button plus one for your
+-- own pet on the party container. Health bar in ._health; no incoming heals.
+local function IsEUIPetButton(b)
+    return b:GetObjectType() == "Button" and b:GetName() == nil and type(b._health) == "table"
+        and b._health.GetStatusBarTexture ~= nil
+end
+
+local function AttachEUIPet(b)
+    if overlays[b] then return end
+    local ov = Attach(b, b._health, 3, nil, "pet", nil, true)
+    if ov then Layout(ov) end
+end
+
+local function AttachEUIPets()
+    local hdr = _G.ERFPetHeader
+    if hdr then
+        for i = 1, 40 do
+            local b = hdr[i]
+            if not b then break end
+            if type(b._health) == "table" then AttachEUIPet(b) end
+        end
+    end
+    local party = _G.ERFPartyHeader
+    if not party then return end
+    local owners = { party:GetParent() } -- the container holds your own pet's button
+    for i = 1, 5 do owners[#owners + 1] = party[i] end
+    for _, o in ipairs(owners) do
+        if o then
+            for _, c in ipairs({ o:GetChildren() }) do
+                if IsEUIPetButton(c) then AttachEUIPet(c) end
+            end
+        end
+    end
 end
 
 -- EllesmereUI unit frames: EllesmereUIUnitFrames_<Name>, health bar in
@@ -650,8 +714,10 @@ local function AttachEUIUnit(f, cat)
     if type(health) ~= "table" or not health.GetStatusBarTexture then return end
     local ab = f.HealthPrediction and f.HealthPrediction.damageAbsorb
     local shape = ab and ab._blizzMaskOn and health._blizzMask or nil
-    local predOn = ab and function() return ab._predOn and true or false end or nil
-    local ov = Attach(f, health, 3, shape, cat, predOn)
+    -- EllesmereUI offers incoming heals on player, target and focus only.
+    local hasPred = cat == "player" or cat == "target" or cat == "focus"
+    local predOn = hasPred and ab and function() return ab._predOn and true or false end or nil
+    local ov = Attach(f, health, 3, shape, cat, predOn, cat == "pet")
     if ov then Layout(ov) end
 end
 
@@ -685,6 +751,8 @@ local function ScanButtons()
     for name, cat in pairs(EUI_UNIT_FRAMES) do
         AttachEUIUnit(_G["EllesmereUIUnitFrames_" .. name], cat)
     end
+    AttachEUIPets()
+    AttachWebbyPets()
 end
 
 -- WebbyFrames keeps the live unit in .wfUnit (its party frames can switch
@@ -714,7 +782,7 @@ local function PaintOverlay(ov, now)
     if type(unit) ~= "string" or not UnitExists(unit) then return HideOverlay(ov) end
 
     if testMode then
-        ov.spacer:SetMinMaxValues(0, 100); ov.spacer:SetValue(0)
+        ov.spacer:SetMinMaxValues(0, 100); ov.spacer:SetValue(ov.ownPred and db.petDirect and 8 or 0)
         ov.tick:SetMinMaxValues(0, 100); ov.tick:SetValue(10)
         ov.hot:SetMinMaxValues(0, 100); ov.hot:SetValue(20)
         ov.spacer:Show(); ov.tick:Show(); ov.hot:Show(); ov.shown = true
@@ -750,16 +818,19 @@ local function PaintOverlay(ov, now)
     -- tick's flash starts from here.
     ov.prevHP = UnitHealth(unit)
 
-    if amount <= 0 then return HideOverlay(ov) end
+    local direct = ov.ownPred and db.petDirect
+    if amount <= 0 and not direct then return HideOverlay(ov) end
     local dead = UnitIsDeadOrGhost(unit)
     if not issecret(dead) and dead then
-        hots[guid] = nil
+        if guid then hots[guid] = nil end
         return HideOverlay(ov)
     end
 
     -- Spacer = incoming heals on the same scale as EllesmereUI reads them.
+    -- Invisible behind the frame's own bar; ours (coloured) where it has none.
     local calc = ov.calc
     if ov.predOn and not ov.predOn() then calc = nil end
+    if ov.ownPred and not direct then calc = nil end
     if calc and UnitGetDetailedHealPrediction and pcall(UnitGetDetailedHealPrediction, unit, nil, calc) then
         ov.spacer:SetMinMaxValues(0, calc:GetMaximumHealth())
         local inc = calc:GetIncomingHeals()
@@ -949,7 +1020,7 @@ end
 HF.SHOW_KEYS = { "party", "player", "target", "targettarget", "focus", "focustarget", "pet" }
 HF.SHOW_LABELS = {
     party = "Party and raid frames", player = "Player", target = "Target",
-    targettarget = "Target of target", focus = "Focus", focustarget = "Focus target", pet = "Pet",
+    targettarget = "Target of target", focus = "Focus", focustarget = "Focus target", pet = "Pets",
 }
 
 function HF.SetEnabled(on)
@@ -982,6 +1053,11 @@ end
 
 function HF.SetShowOthers(on)
     db.showOthers = on and true or false
+    PaintAll()
+end
+
+function HF.SetPetDirect(on)
+    db.petDirect = on and true or false
     PaintAll()
 end
 

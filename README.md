@@ -9,7 +9,9 @@ After the usual incoming-heal bar it draws:
 
 When a tick lands, the health rises into the bright segment, the chunk that was healed flashes, and the next tick starts from the new edge.
 
-Works with **EllesmereUI** (raid and party frames, and the player, target, target of target, focus, focus target and pet frames) and with **WebbyFrames** (the same unit frames, its party frames and the raid-style party tiles). You need at least one of the two.
+Works with **EllesmereUI** (raid and party frames, their pet frames, and the player, target, target of target, focus, focus target and pet frames) and with **WebbyFrames** (the same unit frames, its party frames and pet minis, and the raid-style party and pet tiles).
+
+Pet frames have no incoming-heal bar of their own in either addon, so HoTForecast draws one there (green, before the HoT bars). You need at least one of the two.
 
 ## Settings
 
@@ -18,7 +20,8 @@ Works with **EllesmereUI** (raid and party frames, and the player, target, targe
 - turn the forecast, the tick flash and sending your HoTs to the group on or off
 - show HoTs from everyone, or only you
 - bar colour, and the opacity of the next tick and the rest of the HoT
-- **Show on**: which frames get the bars (party and raid, player, target, target of target, focus, focus target, pet)
+- **Show on**: which frames get the bars (party and raid, player, target, target of target, focus, focus target, pets)
+- direct heals on pet frames
 - the minimap button
 - Test bars, to preview on every frame, and Reset all
 
