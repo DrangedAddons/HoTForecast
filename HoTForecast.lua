@@ -35,7 +35,7 @@ local DEFAULTS = {
 }
 
 local db
-local hots = {}          -- guid -> spellName -> { start, dur, total, ticks, tick, spellID }
+local hots = {}          -- guid -> spellName -> { start, dur, total, ticks, tick, spellID, bloom }
 local pendingCasts = {}  -- castGUID -> { name = target name from SENT, unit = unit found then }
 local descCache = {}     -- spellID -> { total, dur }
 local overlays = setmetatable({}, { __mode = "k" }) -- button -> overlay
@@ -216,6 +216,50 @@ local function UnitFromCastTarget(targetName)
 end
 
 ------------------------------------------------------------------------------
+-- Bloom (druid talent 1328621): when Rejuvenation or Regrowth runs out, the
+-- target is healed for 100% of your Spirit. It lands with the last tick, so
+-- it is added to that tick. (Dispelled: 50%, but then the HoT is gone anyway.)
+------------------------------------------------------------------------------
+
+local BLOOM_TALENT = 1328621
+local bloom = { known = false, spirit = 0 }
+local bloomNames
+
+local function BloomNames()
+    if bloomNames then return bloomNames end
+    local list = { Rejuvenation = true, Regrowth = true }
+    for _, id in ipairs({ 774, 8936 }) do
+        local ok, n = pcall(C_Spell.GetSpellName, id)
+        if ok and type(n) == "string" and not issecret(n) then list[n] = true end
+    end
+    bloomNames = list
+    return list
+end
+
+-- Talent and Spirit, kept from the last plain read.
+local function RefreshBloom()
+    local known
+    if IsPlayerSpell then
+        local ok, v = pcall(IsPlayerSpell, BLOOM_TALENT)
+        if ok and not issecret(v) then known = v and true or false end
+    end
+    if known == nil and C_SpellBook and C_SpellBook.IsSpellKnown then
+        local ok, v = pcall(C_SpellBook.IsSpellKnown, BLOOM_TALENT)
+        if ok and not issecret(v) then known = v and true or false end
+    end
+    if known ~= nil then bloom.known = known end
+    local ok, _, spirit = pcall(UnitStat, "player", 5)
+    if ok and type(spirit) == "number" and not issecret(spirit) then bloom.spirit = spirit end
+end
+
+-- Your Bloom heal for one of your HoTs, by spell name; 0 if it has none.
+local function BloomFor(name)
+    if not bloom.known or type(name) ~= "string" then return 0 end
+    if not BloomNames()[name] then return 0 end
+    return bloom.spirit
+end
+
+------------------------------------------------------------------------------
 -- HoT timers
 ------------------------------------------------------------------------------
 
@@ -234,21 +278,40 @@ local pendingFlash = {}
 local flashId = 0
 local FLASH_WINDOW = 0.3 -- a frame that repaints later than this skips it
 
-local function StartHot(guid, name, spellID, start, dur, total, tick)
+-- bloom: extra heal on the last tick. nil = keep it for the same HoT, else
+-- your own Bloom for your HoTs (shared ones get theirs from a B message).
+local function StartHot(guid, name, spellID, start, dur, total, tick, bloomAmt)
     tick = tick or DEFAULT_TICK
     local ticks = math.max(1, math.floor(dur / tick + 0.5))
     tick = dur / ticks
     hots[guid] = hots[guid] or {}
     local cur = hots[guid][name]
     local landed
-    if cur and cur.spellID == spellID and math.abs(cur.start - start) < 0.5 then
+    local same = cur and cur.spellID == spellID and math.abs(cur.start - start) < 0.5
+    if same then
         landed = cur.landed -- same HoT re-read from its aura: keep the hold state
     else
         landed = math.max(0, math.floor((GetTime() - start) / tick))
     end
+    if bloomAmt == nil then
+        if same and cur.bloom then
+            bloomAmt = cur.bloom
+        elseif not name:find("@", 1, true) then
+            bloomAmt = BloomFor(name)
+        else
+            bloomAmt = 0
+        end
+    end
     hots[guid][name] = { start = start, dur = dur, total = total, ticks = ticks,
                          tick = tick, spellID = spellID, landed = math.min(landed, ticks),
-                         name = name }
+                         name = name, bloom = bloomAmt }
+end
+
+-- Heal of tick k (1..ticks); the last one carries Bloom.
+local function TickAmount(h, k)
+    local a = h.total / h.ticks
+    if k == h.ticks then a = a + (h.bloom or 0) end
+    return a
 end
 
 local function Land(guid, h, n, via, now)
@@ -257,15 +320,17 @@ local function Land(guid, h, n, via, now)
             h.landed + n, h.ticks, via, Rel(guid, now), (h.landed + n) * h.tick + (h.start - (traceRef[guid] or h.start)),
             guid:sub(-8))
     end
+    local amt = 0
+    for k = h.landed + 1, h.landed + n do amt = amt + TickAmount(h, k) end
     h.landed = h.landed + n
     if h.shared and not db.showOthers then return end
     local now2 = GetTime()
     local pf = pendingFlash[guid]
     if pf and now2 - pf.at < 0.05 then
-        pf.amount = pf.amount + h.total / h.ticks * n -- same moment: one flash
+        pf.amount = pf.amount + amt -- same moment: one flash
     else
         flashId = flashId + 1
-        pendingFlash[guid] = { id = flashId, amount = h.total / h.ticks * n, at = now2 }
+        pendingFlash[guid] = { id = flashId, amount = amt, at = now2 }
     end
 end
 
@@ -302,8 +367,8 @@ local function Forecast(guid, now)
         elseif h.shared and not db.showOthers then
             any = true -- kept, so switching back to all shows it at once
         else
-            local perTick = h.total / h.ticks
-            sum = sum + perTick * left
+            local perTick = TickAmount(h, h.landed + 1)
+            sum = sum + h.total / h.ticks * left + (h.bloom or 0)
             local at = h.start + (h.landed + 1) * h.tick
             if not nextAt or at < nextAt - 0.1 then
                 nextAt, nextAmt = at, perTick
@@ -325,6 +390,8 @@ end
 -- Fields are ";"-separated: "|" starts WoW escape codes.
 --   1;S;<caster>;<target>;<spellID>;<total>;<dur>;<tick>;<age>   started/refreshed
 --   1;R;<caster>;<target>;<spellID>                              removed early
+--   1;B;<caster>;<target>;<spellID>;<bloom>                      Bloom on the last tick
+-- B is its own message so clients before 0.10.0 drop only it, not the HoT.
 -- age = seconds since it was applied, so clocks never need to agree.
 ------------------------------------------------------------------------------
 
@@ -364,6 +431,11 @@ local function ShareStart(guid, spellID, total, dur, tick, age)
     if not me then return end
     Send(string.format("1;S;%s;%s;%d;%d;%.2f;%.2f;%.2f", me, guid, spellID,
         math.floor(total + 0.5), dur, tick, math.max(0, age)))
+    local okN, nm = pcall(C_Spell.GetSpellName, spellID)
+    local b = okN and not issecret(nm) and BloomFor(nm) or 0
+    if b > 0 then
+        Send(string.format("1;B;%s;%s;%d;%d", me, guid, spellID, math.floor(b + 0.5)))
+    end
 end
 
 local function ShareStop(guid, spellID)
@@ -399,6 +471,11 @@ local function OnAddonMessage(prefix, text, channel, sender)
         StartHot(target, key, spellID, GetTime() - age, dur, total, tick)
         local h = hots[target] and hots[target][key]
         if h then h.shared = true end
+    elseif kind == "B" then
+        local b = tonumber(rest:match("^(%d+)$") or "")
+        if not b then comm.bad = comm.bad + 1 return end
+        local h = hots[target] and hots[target][key]
+        if h then h.bloom = b end
     elseif kind == "R" then
         local list = hots[target]
         if list then
@@ -1008,6 +1085,7 @@ f:RegisterEvent("UNIT_HEALTH")
 if not (C_EventUtils and C_EventUtils.IsEventValid) or C_EventUtils.IsEventValid("CHAT_MSG_ADDON") then
     f:RegisterEvent("CHAT_MSG_ADDON")
 end
+f:RegisterUnitEvent("UNIT_STATS", "player")
 f:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")
 f:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 
@@ -1034,8 +1112,16 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
     end
     if not db then return end
 
-    if event == "PLAYER_LOGIN" then
+    if event == "PLAYER_LOGIN" or event == "SPELLS_CHANGED" or event == "PLAYER_EQUIPMENT_CHANGED"
+       or event == "UNIT_STATS" or event == "PLAYER_REGEN_ENABLED" then
+        RefreshBloom()
+    end
+
+    if event == "UNIT_STATS" then
+        return
+    elseif event == "PLAYER_LOGIN" then
         C_Timer.After(2, function()
+            RefreshBloom()
             PrewarmSpells()
             ScanButtons()
             SyncAllFromAuras()
@@ -1262,6 +1348,7 @@ SlashCmdList.HOTFORECAST = function(msg)
         local n, now = 0, GetTime()
         for _ in pairs(overlays) do n = n + 1 end
         Print(n .. " frames attached.")
+        Print(string.format("Bloom: talent %s, Spirit %d", bloom.known and "known" or "not known", bloom.spirit))
         if lastCast then
             Print(string.format("last HoT cast: %s on \"%s\" -> %s", lastCast.spell or "?",
                 lastCast.target or "?", lastCast.result or "?"))
@@ -1277,9 +1364,9 @@ SlashCmdList.HOTFORECAST = function(msg)
             comm.lastResult, comm.recv, comm.secret, comm.bad))
         for guid, list in pairs(hots) do
             for name, h in pairs(list) do
-                Print(string.format("%s %s: %d of %d left, %d/%d ticks landed, %.1fs left",
+                Print(string.format("%s %s: %d of %d left, %d/%d ticks landed, %.1fs left, bloom %d",
                     guid:sub(-8), name, math.floor(h.total * (h.ticks - h.landed) / h.ticks),
-                    h.total, h.landed, h.ticks, h.dur - (now - h.start)))
+                    h.total, h.landed, h.ticks, h.dur - (now - h.start), h.bloom or 0))
             end
         end
         for id, c in pairs(descCache) do

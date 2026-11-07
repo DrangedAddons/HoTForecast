@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.0
+- Druids with Bloom: the heal when Rejuvenation or Regrowth runs out (100% of your Spirit) is added to the HoT's last tick, so the forecast and the tick flash include it.
+- Bloom is shared with the group as a separate message. Older HoTForecast versions ignore it and still show the HoT, without Bloom.
+- `/hotf debug` shows whether Bloom is known and the Spirit it uses.
+
 ## 0.9.4
 - HoTs on pets in combat. The game hides the target's name when you cast on a pet in combat, so the HoT was dropped. Now HoTForecast takes the frame under your mouse when you cast (click-casting, mouseover macros), or the pet you have targeted.
 

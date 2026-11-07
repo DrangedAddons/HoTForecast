@@ -9,6 +9,8 @@ After the usual incoming-heal bar it draws:
 
 When a tick lands, the health rises into the bright segment, the chunk that was healed flashes, and the next tick starts from the new edge.
 
+Druids with the Bloom talent get its heal (100% of your Spirit) added to the last tick of Rejuvenation and Regrowth.
+
 Works with **EllesmereUI** (raid and party frames, their pet frames, and the player, target, target of target, focus, focus target and pet frames) and with **WebbyFrames** (the same unit frames, its party frames and pet minis, and the raid-style party and pet tiles).
 
 Pet frames have no incoming-heal bar of their own in either addon, so HoTForecast draws one there (green, before the HoT bars). You need at least one of the two.
