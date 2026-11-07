@@ -897,9 +897,29 @@ local function Show(v)
     return tostring(v)
 end
 
+-- Saved in db.castLog (last 10) so a report needs only a /reload.
+local function UnitInfo(u)
+    if not UnitExists(u) then return nil end
+    return string.format("name=%s guid=%s", Show(UnitName(u)), Show(UnitGUID(u)))
+end
+
+local function LogCast(lc)
+    if not db then return end
+    local units = {}
+    for _, u in ipairs({ "target", "mouseover", "pet", "partypet1", "partypet2", "partypet3", "partypet4" }) do
+        units[u] = UnitInfo(u)
+    end
+    lc.units = units
+    lc.combat = InCombatLockdown() and true or false
+    db.castLog = db.castLog or {}
+    table.insert(db.castLog, 1, lc)
+    while #db.castLog > 10 do table.remove(db.castLog) end
+end
+
 local function OnCastSent(targetName, castGUID, spellID)
     if not HotName(spellID) then return end
     lastCast = { spell = HotName(spellID), target = Show(targetName), result = "sent, no SUCCEEDED yet" }
+    LogCast(lastCast)
     if issecret(castGUID) or not castGUID then
         lastCast.result = "cast id " .. Show(castGUID)
         return

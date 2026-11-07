@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.9.3
+- The last 10 HoT casts and what the game showed about the target and pets are saved, for bug reports.
+
 ## 0.9.2
 - `/hotf debug` shows what happened to your last HoT cast, and what HoTForecast can read about your target (name, GUID, buffs).
 
