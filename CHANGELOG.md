@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.9.2
+- `/hotf debug` shows what happened to your last HoT cast, and what HoTForecast can read about your target (name, GUID, buffs).
+
 ## 0.9.1
 - HoTs cast on pets are tracked. The cast's target was only looked up among players, so pet frames showed direct heals but no HoTs.
 - A cast's target is matched against your target, focus and mouseover first, then the group and pets.

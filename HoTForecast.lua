@@ -889,9 +889,21 @@ f:SetScript("OnUpdate", function(_, dt)
     end
 end)
 
+-- What happened to the last HoT cast, for /hotf debug.
+local lastCast
+
+local function Show(v)
+    if issecret(v) then return "SECRET" end
+    return tostring(v)
+end
+
 local function OnCastSent(targetName, castGUID, spellID)
-    if issecret(castGUID) or not castGUID then return end
     if not HotName(spellID) then return end
+    lastCast = { spell = HotName(spellID), target = Show(targetName), result = "sent, no SUCCEEDED yet" }
+    if issecret(castGUID) or not castGUID then
+        lastCast.result = "cast id " .. Show(castGUID)
+        return
+    end
     pendingCasts[castGUID] = targetName
 end
 
@@ -901,14 +913,19 @@ local function OnCastSucceeded(castGUID, spellID)
     if issecret(castGUID) or not castGUID then return end
     local targetName = pendingCasts[castGUID]
     pendingCasts[castGUID] = nil
+    local lc = lastCast or {}
+    lastCast = lc
+    lc.spell = name
     -- No target name means an untargeted (e.g. party-wide) cast: skip it
     -- rather than guess who it landed on.
     local unit = UnitFromCastTarget(targetName)
-    if not unit then return end
+    if not unit then lc.result = "no unit matched that name" return end
+    lc.unit = unit
     local guid = PlainGUID(unit)
-    if not guid then return end
+    if not guid then lc.result = "unit " .. unit .. " has GUID " .. Show(UnitGUID(unit)) return end
     local total, dur, tick = SpellAmount(spellID)
-    if not total then return end
+    if not total then lc.result = "no amount in the description" return end
+    lc.result = string.format("tracked on %s: %d over %ss", unit, total, tostring(dur))
     local now = GetTime()
     StartHot(guid, name, spellID, now, dur, total, tick)
     ShareStart(guid, spellID, total, dur, tick or DEFAULT_TICK, 0)
@@ -1189,6 +1206,16 @@ SlashCmdList.HOTFORECAST = function(msg)
         local n, now = 0, GetTime()
         for _ in pairs(overlays) do n = n + 1 end
         Print(n .. " frames attached.")
+        if lastCast then
+            Print(string.format("last HoT cast: %s on \"%s\" -> %s", lastCast.spell or "?",
+                lastCast.target or "?", lastCast.result or "?"))
+        end
+        if UnitExists("target") then
+            local okA, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "target", 1, "HELPFUL|PLAYER")
+            Print(string.format("target: name %s, GUID %s, your buffs readable %s",
+                Show(UnitName("target")), Show(UnitGUID("target")),
+                okA and (aura and "yes" or "yes (none)") or "no"))
+        end
         Print(string.format("sharing %s, channel %s: sent %d, failed %d (last %s), received %d, unreadable %d, bad %d",
             (db.share and "on" or "off") .. (db.showOthers and ", showing all" or ", showing mine"), GroupChannel() or "none", comm.sent, comm.failed,
             comm.lastResult, comm.recv, comm.secret, comm.bad))
