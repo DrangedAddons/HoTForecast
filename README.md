@@ -15,7 +15,8 @@ Works with **EllesmereUI** (raid and party frames, and the player, target, targe
 
 `/hotf`, the minimap button, or Options > AddOns > HoTForecast opens the settings window:
 
-- turn the forecast, the tick flash and HoT sharing on or off
+- turn the forecast, the tick flash and sending your HoTs to the group on or off
+- show HoTs from everyone, or only you
 - bar colour, and the opacity of the next tick and the rest of the HoT
 - **Show on**: which frames get the bars (party and raid, player, target, target of target, focus, focus target, pet)
 - the minimap button
@@ -45,7 +46,8 @@ Every HoTForecast user shares their HoTs with the group over addon messages, so 
 | `/hotf tickalpha 0-100` | Opacity of the next-tick bar (default 65) |
 | `/hotf color r g b` | Bar colour, 0-1 or 0-255 |
 | `/hotf flash on` / `off` | The flash when a tick lands |
-| `/hotf share on` / `off` | Send your HoTs to the group and show other users' |
+| `/hotf share on` / `off` | Send your HoTs to the group |
+| `/hotf show mine` / `all` | Show only your HoTs, or other HoTForecast users' too |
 | `/hotf test` | Preview bars and the flash on every frame |
 | `/hotf debug` | Attached frames, active HoTs, recognised HoT spells, sharing counters |
 | `/hotf trace` / `trace clear` | Record tick timing to the saved variables, for bug reports |

@@ -59,6 +59,19 @@ local function Check(parent, label, get, set, x, y, tip)
     return Track(cb)
 end
 
+-- One choice of a pair: get() says whether it's the selected one.
+local function Radio(parent, label, get, pick, x, y, tip)
+    local rb = CreateFrame("CheckButton", nil, parent, "UIRadioButtonTemplate")
+    rb:SetSize(18, 18)
+    rb:SetPoint("TOPLEFT", x + 3, y - 3)
+    local fs = Text(parent, label)
+    fs:SetPoint("LEFT", rb, "RIGHT", 4, 0)
+    rb:SetScript("OnClick", function() pick() end)
+    Tip(rb, tip)
+    function rb:Refresh() self:SetChecked(get() and true or false) end
+    return Track(rb)
+end
+
 local function Round(v, step)
     return math.floor(v / step + 0.5) * step
 end
@@ -164,7 +177,7 @@ end
 local function Build()
     local db = HF.db
     frame = CreateFrame("Frame", "HoTForecastConfig", UIParent, "BackdropTemplate")
-    frame:SetSize(520, 420)
+    frame:SetSize(520, 440)
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
     frame:SetBackdrop({
@@ -198,13 +211,20 @@ local function Build()
     Text(frame, "General", "GameFontNormal"):SetPoint("TOPLEFT", L, -50)
     Check(frame, "Show HoT forecasts", function() return db.enabled end, HF.SetEnabled, L, -68)
     Check(frame, "Flash when a tick lands", function() return db.flash end, HF.SetFlash, L, -94)
-    Check(frame, "Share HoTs with the group", function() return db.share end, HF.SetShare, L, -120,
-        "Sends your HoTs to group members who run HoTForecast, and shows theirs on your frames.")
+    Check(frame, "Send your HoTs to the group", function() return db.share end, HF.SetShare, L, -120,
+        "Group members who run HoTForecast see your HoTs on their frames.")
 
-    Text(frame, "Look", "GameFontNormal"):SetPoint("TOPLEFT", L, -164)
-    ColorSwatch(frame, "Bar colour", L, -186)
-    Slider(frame, "Next tick opacity", function() return db.tickAlpha end, HF.SetTickAlpha, 0, 100, 1, L + 4, -222)
-    Slider(frame, "Rest of the HoT opacity", function() return db.alpha end, HF.SetAlpha, 0, 100, 1, L + 4, -266)
+    Text(frame, "Show HoTs from", "GameFontNormal"):SetPoint("TOPLEFT", L, -156)
+    Radio(frame, "Everyone", function() return db.showOthers end,
+        function() HF.SetShowOthers(true) HF.RefreshConfig() end, L, -174,
+        "Your HoTs plus those of other healers who run HoTForecast.")
+    Radio(frame, "Only you", function() return not db.showOthers end,
+        function() HF.SetShowOthers(false) HF.RefreshConfig() end, L + 110, -174)
+
+    Text(frame, "Look", "GameFontNormal"):SetPoint("TOPLEFT", L, -212)
+    ColorSwatch(frame, "Bar colour", L, -234)
+    Slider(frame, "Next tick opacity", function() return db.tickAlpha end, HF.SetTickAlpha, 0, 100, 1, L + 4, -270)
+    Slider(frame, "Rest of the HoT opacity", function() return db.alpha end, HF.SetAlpha, 0, 100, 1, L + 4, -314)
 
     -- Right column: which frames.
     local R = 280

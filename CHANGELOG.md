@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0
+- Show HoTs from: Everyone, or Only you. With Only you, other HoTForecast users' HoTs are hidden but still tracked, so switching back shows them straight away. `/hotf show mine|all` does the same from chat.
+- "Send your HoTs to the group" now only controls sending. Turning it off no longer hides other users' HoTs; use Show HoTs from for that.
+
 ## 0.7.0
 - Settings window: `/hotf`, the minimap button, the addon compartment, or Options > AddOns > HoTForecast. Everything the slash commands did is there, plus Test bars and Reset all.
 - Show on: switch the bars on or off for party and raid frames, player, target, target of target, focus, focus target and pet. Each covers both EllesmereUI and WebbyFrames.

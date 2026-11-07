@@ -24,7 +24,8 @@ local DEFAULTS = {
     alpha = 35,          -- percent, the rest of the HoTs
     tickAlpha = 65,      -- percent, the next tick
     flash = true,        -- pop the healed chunk when a tick goes off
-    share = true,        -- send your HoTs to the group and show other users'
+    share = true,        -- send your HoTs to the group
+    showOthers = true,   -- show other HoTForecast users' HoTs (false: only yours)
     -- Which frames get the bars. Each covers EllesmereUI's and WebbyFrames'
     -- frame for that unit; "party" is every party and raid frame.
     show = { party = true, player = true, target = true, targettarget = true,
@@ -242,6 +243,7 @@ local function Land(guid, h, n, via, now)
             guid:sub(-8))
     end
     h.landed = h.landed + n
+    if h.shared and not db.showOthers then return end
     local now2 = GetTime()
     local pf = pendingFlash[guid]
     if pf and now2 - pf.at < 0.05 then
@@ -282,6 +284,8 @@ local function Forecast(guid, now)
         local left = h.ticks - h.landed
         if left <= 0 then
             list[name] = nil
+        elseif h.shared and not db.showOthers then
+            any = true -- kept, so switching back to all shows it at once
         else
             local perTick = h.total / h.ticks
             sum = sum + perTick * left
@@ -364,7 +368,7 @@ local function OnAddonMessage(prefix, text, channel, sender)
     local v, kind, caster, target, id, rest = text:match("^(%d+);(%a);([^;]+);([^;]+);(%d+);?(.*)$")
     if v ~= "1" then comm.bad = comm.bad + 1 return end
     if caster == PlainGUID("player") then return end -- our own echo
-    if not db or not db.share then return end
+    if not db then return end
     local spellID = tonumber(id)
     local okN, nm = pcall(C_Spell.GetSpellName, spellID)
     if not okN or type(nm) ~= "string" or issecret(nm) then nm = tostring(id) end
@@ -974,13 +978,10 @@ end
 
 function HF.SetShare(on)
     db.share = on and true or false
-    if db.share then return end
-    for guid, list in pairs(hots) do
-        for key, h in pairs(list) do
-            if h.shared then list[key] = nil end
-        end
-        if not next(list) then hots[guid] = nil end
-    end
+end
+
+function HF.SetShowOthers(on)
+    db.showOthers = on and true or false
     PaintAll()
 end
 
@@ -1009,7 +1010,6 @@ function HF.ResetAll()
             end
         end
     end
-    HF.SetShare(db.share)
     RefreshColors()
     PaintAll()
 end
@@ -1054,8 +1054,14 @@ SlashCmdList.HOTFORECAST = function(msg)
         end
     elseif cmd == "share" then
         HF.SetShare(OnOff(rest, db.share))
-        Print("sharing " .. (db.share and "on: your HoTs go to the group and other users' show here."
-            or "off."))
+        Print("sharing " .. (db.share and "on: your HoTs go to the group." or "off."))
+    elseif cmd == "show" then
+        if rest == "mine" or rest == "all" then
+            HF.SetShowOthers(rest == "all")
+            if HF.RefreshConfig then HF.RefreshConfig() end
+        end
+        Print(db.showOthers and "showing everyone's HoTs (other HoTForecast users' too)."
+            or "showing only your HoTs.")
     elseif cmd == "flash" then
         HF.SetFlash(OnOff(rest, db.flash))
         Print("tick flash " .. (db.flash and "on." or "off."))
@@ -1093,7 +1099,7 @@ SlashCmdList.HOTFORECAST = function(msg)
         for _ in pairs(overlays) do n = n + 1 end
         Print(n .. " frames attached.")
         Print(string.format("sharing %s, channel %s: sent %d, failed %d (last %s), received %d, unreadable %d, bad %d",
-            db.share and "on" or "off", GroupChannel() or "none", comm.sent, comm.failed,
+            (db.share and "on" or "off") .. (db.showOthers and ", showing all" or ", showing mine"), GroupChannel() or "none", comm.sent, comm.failed,
             comm.lastResult, comm.recv, comm.secret, comm.bad))
         for guid, list in pairs(hots) do
             for name, h in pairs(list) do
@@ -1110,6 +1116,6 @@ SlashCmdList.HOTFORECAST = function(msg)
             end
         end
     else
-        Print("/hotf opens the settings. Also: on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | share [on|off] | color <r g b> | test | debug | trace [clear]")
+        Print("/hotf opens the settings. Also: on | off | alpha <0-100> | tickalpha <0-100> | flash [on|off] | share [on|off] | show mine|all | color <r g b> | test | debug | trace [clear]")
     end
 end
