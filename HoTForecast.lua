@@ -166,13 +166,27 @@ end
 -- Group roster: name -> unit, unit -> guid
 ------------------------------------------------------------------------------
 
+-- Group members, then their pets.
 local function GroupUnits()
     local list = { "player" }
     if IsInRaid() then
-        for i = 1, GetNumGroupMembers() do list[#list + 1] = "raid" .. i end
+        local n = GetNumGroupMembers()
+        for i = 1, n do list[#list + 1] = "raid" .. i end
+        list[#list + 1] = "pet"
+        for i = 1, n do list[#list + 1] = "raidpet" .. i end
     else
         for i = 1, 4 do list[#list + 1] = "party" .. i end
+        list[#list + 1] = "pet"
+        for i = 1, 4 do list[#list + 1] = "partypet" .. i end
     end
+    return list
+end
+
+-- Where a cast's target is looked for: the units you most likely aimed at
+-- first, then the group and pets.
+local function CastCandidates()
+    local list = { "target", "focus", "mouseover" }
+    for _, u in ipairs(GroupUnits()) do list[#list + 1] = u end
     return list
 end
 
@@ -187,7 +201,7 @@ end
 local function UnitFromCastTarget(targetName)
     if type(targetName) ~= "string" or issecret(targetName) then return nil end
     local best, bestLen
-    for _, u in ipairs(GroupUnits()) do
+    for _, u in ipairs(CastCandidates()) do
         if UnitExists(u) then
             local n = UnitName(u)
             if type(n) == "string" and not issecret(n) then
@@ -987,7 +1001,8 @@ f:SetScript("OnEvent", function(_, event, a1, a2, a3, a4)
         end
     elseif event == "UNIT_AURA" then
         if issecret(a1) or type(a1) ~= "string" then return end
-        if (a1 == "player" or a1:match("^party%d$") or a1:match("^raid%d+$")) and AurasReadable() then
+        if (a1 == "player" or a1 == "pet" or a1:match("^party%d$") or a1:match("^raid%d+$")
+            or a1:match("^partypet%d$") or a1:match("^raidpet%d+$")) and AurasReadable() then
             SyncUnitFromAuras(a1)
             PaintAll()
         end

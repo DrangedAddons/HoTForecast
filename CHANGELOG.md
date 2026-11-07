@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1
+- HoTs cast on pets are tracked. The cast's target was only looked up among players, so pet frames showed direct heals but no HoTs.
+- A cast's target is matched against your target, focus and mouseover first, then the group and pets.
+
 ## 0.9.0
 - HoT bars on every pet frame: EllesmereUI's pet frame, its raid-frame pets (pet header and Beside Owner), and WebbyFrames' party pet minis and raid-style pet tiles. WebbyFrames' main pet frame already had them.
 - Direct heals on pets: pet frames without an incoming-heal bar of their own get one from HoTForecast, in green, before the HoT bars. "Direct heals on pets" in the settings turns it off.
