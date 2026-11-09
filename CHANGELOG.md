@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.1
+- HoT bars on EllesmereUI pet frames no longer need a /reload. A pet button that EllesmereUI created before giving it a size got bars with no width, and they were never resized. Every frame's bars are now re-checked against its size each second.
+- The cast log also records which frames show the unit a HoT went on, for bug reports.
+
 ## 0.10.0
 - Druids with Bloom: the heal when Rejuvenation or Regrowth runs out (100% of your Spirit) is added to the HoT's last tick, so the forecast and the tick flash include it.
 - Bloom is shared with the group as a separate message. Older HoTForecast versions ignore it and still show the HoT, without Bloom.

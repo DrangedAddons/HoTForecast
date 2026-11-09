@@ -844,6 +844,11 @@ local function ScanButtons()
     end
     AttachEUIPets()
     AttachWebbyPets()
+    -- Every frame, not just new ones: a frame attached before its addon gave
+    -- it a size (EllesmereUI's pet buttons are sized on their first layout)
+    -- or that changed size later gets its bars resized here. Layout does
+    -- nothing when the size hasn't changed.
+    for _, ov in pairs(overlays) do Layout(ov) end
 end
 
 -- WebbyFrames keeps the live unit in .wfUnit (its party frames can switch
@@ -1059,6 +1064,19 @@ local function OnCastSucceeded(castGUID, spellID)
     if not total then lc.result = "no amount in the description" return end
     lc.result = string.format("tracked on %s%s: %d over %ss", unit, lc.via and (" (via " .. lc.via .. ")") or "",
         total, tostring(dur))
+    -- Which of our frames show this unit, for reports: "cat unit shown/hidden".
+    local frames = {}
+    for btn, ov in pairs(overlays) do
+        local u = OverlayUnit(btn)
+        if type(u) == "string" and UnitExists(u) and PlainGUID(u) == guid then
+            frames[#frames + 1] = string.format("%s %s %s %s", ov.cat, u, btn:GetName() or "unnamed",
+                btn:IsVisible() and "visible" or "hidden")
+        end
+    end
+    lc.frames = #frames > 0 and frames or "none"
+    local pets = 0
+    for _, ov in pairs(overlays) do if ov.cat == "pet" then pets = pets + 1 end end
+    lc.petFrames = pets
     local now = GetTime()
     StartHot(guid, name, spellID, now, dur, total, tick)
     ShareStart(guid, spellID, total, dur, tick or DEFAULT_TICK, 0)
