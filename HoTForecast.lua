@@ -109,6 +109,30 @@ local function ParseDesc(text)
     return total, dur, tick
 end
 
+-- Wild Growth (408120 and its ranks): the description gives no tick time and
+-- says the healing is front-loaded. Assumed 1 sec ticks, falling linearly by
+-- WG_DECAY of the average tick per tick (7 ticks: +6% ... -6%), as the
+-- classic spell does. Health is secret, so this can't be measured in game.
+local WG_ID, WG_TICK, WG_DECAY = 408120, 1, 0.02
+local wgNames
+
+local function IsWildGrowth(name)
+    if type(name) ~= "string" then return false end
+    if not wgNames then
+        local list = { ["Wild Growth"] = true }
+        local ok, n = pcall(C_Spell.GetSpellName, WG_ID)
+        if ok and type(n) == "string" and not issecret(n) then list[n] = true end
+        wgNames = list
+    end
+    return wgNames[name] == true
+end
+
+local function SpellNameOf(spellID)
+    local ok, n = pcall(C_Spell.GetSpellName, spellID)
+    if ok and type(n) == "string" and not issecret(n) then return n end
+    return nil
+end
+
 -- Read the description fresh when possible (it follows gear and buffs),
 -- else use the last good read for that rank. false = known not a HoT.
 local function SpellAmount(spellID)
@@ -117,6 +141,7 @@ local function SpellAmount(spellID)
     local ok, text = pcall(C_Spell.GetSpellDescription, spellID)
     if ok and type(text) == "string" and not issecret(text) and text ~= "" then
         local total, dur, tick = ParseDesc(text)
+        if total and IsWildGrowth(SpellNameOf(spellID)) then tick = WG_TICK end
         if total then
             descCache[spellID] = { total = total, dur = dur, tick = tick }
             return total, dur, tick
@@ -304,14 +329,23 @@ local function StartHot(guid, name, spellID, start, dur, total, tick, bloomAmt)
     end
     hots[guid][name] = { start = start, dur = dur, total = total, ticks = ticks,
                          tick = tick, spellID = spellID, landed = math.min(landed, ticks),
-                         name = name, bloom = bloomAmt }
+                         name = name, bloom = bloomAmt,
+                         decay = IsWildGrowth(SpellNameOf(spellID)) and WG_DECAY or nil }
 end
 
--- Heal of tick k (1..ticks); the last one carries Bloom.
+-- Heal of tick k (1..ticks). Front-loaded HoTs (decay) start above the
+-- average and end below it; the last tick carries Bloom.
 local function TickAmount(h, k)
     local a = h.total / h.ticks
+    if h.decay then a = a * (1 + h.decay * ((h.ticks + 1) / 2 - k)) end
     if k == h.ticks then a = a + (h.bloom or 0) end
     return a
+end
+
+local function AmountLeft(h)
+    local sum = 0
+    for k = h.landed + 1, h.ticks do sum = sum + TickAmount(h, k) end
+    return sum
 end
 
 local function Land(guid, h, n, via, now)
@@ -368,7 +402,7 @@ local function Forecast(guid, now)
             any = true -- kept, so switching back to all shows it at once
         else
             local perTick = TickAmount(h, h.landed + 1)
-            sum = sum + h.total / h.ticks * left + (h.bloom or 0)
+            sum = sum + AmountLeft(h)
             local at = h.start + (h.landed + 1) * h.tick
             if not nextAt or at < nextAt - 0.1 then
                 nextAt, nextAmt = at, perTick
@@ -1037,6 +1071,52 @@ local function OnCastSent(targetName, castGUID, spellID)
     pendingCasts[castGUID] = entry
 end
 
+-- Who a Wild Growth on unit also lands on: the target's party (in a raid,
+-- its subgroup). Range to the target can't be read, so everyone in it who
+-- isn't dead, offline or out of sight counts; the real auras correct it out
+-- of combat. Pets are left to that correction too.
+local function Plain(fn, u)
+    local ok, v = pcall(fn, u)
+    if not ok or issecret(v) then return nil end
+    return v
+end
+
+local function WildGrowthUnits(unit)
+    local list = {}
+    local tguid = PlainGUID(unit)
+    local function add(u)
+        if not UnitExists(u) then return end
+        local g = PlainGUID(u)
+        if not g or g == tguid then return end
+        if Plain(UnitIsDeadOrGhost, u) == true then return end
+        if Plain(UnitIsConnected, u) == false then return end
+        if Plain(UnitIsVisible, u) == false then return end
+        list[#list + 1] = u
+    end
+    if IsInRaid() then
+        local n, group = GetNumGroupMembers(), nil
+        for i = 1, n do
+            if PlainGUID("raid" .. i) == tguid then
+                local _, _, sub = GetRaidRosterInfo(i)
+                if not issecret(sub) then group = sub end
+                break
+            end
+        end
+        if not group then return list end -- target not a raid member (e.g. a pet)
+        for i = 1, n do
+            local _, _, sub = GetRaidRosterInfo(i)
+            if not issecret(sub) and sub == group then add("raid" .. i) end
+        end
+    elseif IsInGroup() then
+        local inParty = PlainGUID("player") == tguid
+        for i = 1, 4 do if PlainGUID("party" .. i) == tguid then inParty = true end end
+        if not inParty then return list end
+        add("player")
+        for i = 1, 4 do add("party" .. i) end
+    end
+    return list
+end
+
 local function OnCastSucceeded(castGUID, spellID)
     local name = HotName(spellID)
     if not name then return end
@@ -1080,6 +1160,15 @@ local function OnCastSucceeded(castGUID, spellID)
     local now = GetTime()
     StartHot(guid, name, spellID, now, dur, total, tick)
     ShareStart(guid, spellID, total, dur, tick or DEFAULT_TICK, 0)
+    if IsWildGrowth(name) then
+        local others = WildGrowthUnits(unit)
+        for _, u in ipairs(others) do
+            local g = PlainGUID(u)
+            StartHot(g, name, spellID, now, dur, total, tick)
+            ShareStart(g, spellID, total, dur, tick or DEFAULT_TICK, 0)
+        end
+        lc.result = lc.result .. string.format(", plus %d party member(s)", #others)
+    end
     if tracing then
         local h = hots[guid][name]
         traceRef[guid] = now
@@ -1383,7 +1472,7 @@ SlashCmdList.HOTFORECAST = function(msg)
         for guid, list in pairs(hots) do
             for name, h in pairs(list) do
                 Print(string.format("%s %s: %d of %d left, %d/%d ticks landed, %.1fs left, bloom %d",
-                    guid:sub(-8), name, math.floor(h.total * (h.ticks - h.landed) / h.ticks),
+                    guid:sub(-8), name, math.floor(AmountLeft(h)),
                     h.total, h.landed, h.ticks, h.dur - (now - h.start), h.bloom or 0))
             end
         end

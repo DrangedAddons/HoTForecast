@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.0
+- Wild Growth. It ticks every second, and each tick heals a little less than the one before (assumed +6% down to -6% of the average, like the classic spell; Forever doesn't let addons read the real amounts).
+- Wild Growth goes on the target's whole party (in a raid, their subgroup), skipping anyone dead, offline or out of sight. In combat the 43-yard range can't be checked, so someone too far away may show it until combat ends, when the real buffs correct it.
+
 ## 0.10.1
 - HoT bars on EllesmereUI pet frames no longer need a /reload. A pet button that EllesmereUI created before giving it a size got bars with no width, and they were never resized. Every frame's bars are now re-checked against its size each second.
 - The cast log also records which frames show the unit a HoT went on, for bug reports.
