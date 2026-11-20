@@ -5,6 +5,9 @@
 ## Version: 0.11.0
 ## OptionalDeps: EllesmereUIRaidFrames, EllesmereUIUnitFrames, WebbyFrames
 ## X-DrangedAddons-Games: _forever_
+## X-DrangedHub-Frame: HoTForecastConfig
+## X-DrangedHub-Open: /hotf config
+## X-DrangedHub-Crop: 42
 ## IconTexture: Interface\AddOns\HoTForecast\icon
 ## AddonCompartmentFunc: HoTForecast_OnCompartmentClick
 ## SavedVariablesPerCharacter: HoTForecastCharDB
